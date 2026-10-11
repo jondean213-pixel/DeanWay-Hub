@@ -104,6 +104,12 @@ class MainActivity : AppCompatActivity() {
         choose = button("Choose model file (.litertlm)") { launchModelPicker() }
         root.addView(choose)
 
+        // Network Hub
+        root.addView(label("QuietOS Network"))
+        root.addView(button("Open Network Hub") {
+            startActivity(Intent(this, com.deanwaylabs.quietos.network.NetworkHubActivity::class.java))
+        })
+
         // Activity log (read-only)
         root.addView(label("Log"))
         log = TextView(this).apply {
