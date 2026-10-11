@@ -17,7 +17,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
-import com.deanwaylabs.quietos.ai.LiteRtGemmaModel
+import com.deanwaylabs.quietos.ai.ModelProvider
 import com.deanwaylabs.quietos.ai.ModelState
 import com.deanwaylabs.quietos.attention.AttentionClass
 import com.deanwaylabs.quietos.attention.AttentionRepository
@@ -33,7 +33,7 @@ import java.io.FileOutputStream
  * No voice, no branding, no showpiece. A quiet tool.
  */
 class MainActivity : AppCompatActivity() {
-    private val model = LiteRtGemmaModel()
+    private val model = ModelProvider.create()
     private lateinit var status: TextView
     private lateinit var log: TextView
     private lateinit var choose: Button
