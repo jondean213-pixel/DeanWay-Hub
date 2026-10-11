@@ -35,21 +35,22 @@ jobs:
           python -m pip install --quiet sherpa-onnx sentencepiece pypinyin
           printf 'GEMMA\n' > /tmp/keywords_raw.txt
           sherpa-onnx-cli text2token --tokens /tmp/$MODEL/tokens.txt --tokens-type bpe --bpe-model /tmp/$MODEL/bpe.model /tmp/keywords_raw.txt app/src/main/assets/$MODEL/keywords.txt
-      - name: Unit tests
-        run: gradle testDebugUnitTest
-      - name: Debug APK
-        run: gradle assembleDebug
-      - name: Publish APK as GitHub Release asset
+      - name: Unit tests (both flavors)
+        run: gradle testMotorolaDebugUnitTest testPhoneBDebugUnitTest
+      - name: Debug APKs (both flavors)
+        run: gradle assembleMotorolaDebug assemblePhoneBDebug
+      - name: Publish APKs as GitHub Release assets
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="quietos-ci-${{ github.run_number }}"
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          OUT="QuietOS-Alpha-0.1-CI${{ github.run_number }}.apk"
-          cp "$APK" "$OUT"
-          gh release create "$TAG" "$OUT" \
+          cp "app/build/outputs/apk/motorola/debug/app-motorola-debug.apk" "QuietOS-Alpha-0.1-CI${{ github.run_number }}-motorola.apk"
+          cp "app/build/outputs/apk/phoneB/debug/app-phoneB-debug.apk" "QuietOS-Alpha-0.1-CI${{ github.run_number }}-phoneB.apk"
+          gh release create "$TAG" \
+            "QuietOS-Alpha-0.1-CI${{ github.run_number }}-motorola.apk" \
+            "QuietOS-Alpha-0.1-CI${{ github.run_number }}-phoneB.apk" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "QuietOS Alpha 0.1 CI ${{ github.run_number }}" \
-            --notes "Automated QuietOS debug APK from CI run ${{ github.run_number }}. Source commit: ${{ github.sha }}."
+            --notes "Automated QuietOS debug APKs from CI run ${{ github.run_number }}. Source commit: ${{ github.sha }}. motorola = full build (Gemma AI); phoneB = relay build (no AI natives, 32-bit compatible)."
