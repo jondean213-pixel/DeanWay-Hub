@@ -195,7 +195,8 @@ class NetworkHubActivity : AppCompatActivity() {
         root.addView(button("Connect to peer (IP)") { showConnect() })
 
         // -- Cloud relay (forgotten-phone path) --
-        root.addView(label("Cloud Relay", 14f, GOLD, bold = true))        val cloudRow = LinearLayout(this).apply {
+        root.addView(label("Cloud Relay", 14f, GOLD, bold = true))
+        val cloudRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
         cloudRow.addView(button("Start cloud relay") {
