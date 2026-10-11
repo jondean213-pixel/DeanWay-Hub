@@ -6,6 +6,8 @@ import com.deanwaylabs.quietos.network.guardian.GuardianModule
 import com.deanwaylabs.quietos.network.pairing.PairedDevice
 import com.deanwaylabs.quietos.network.pairing.newPairingCode
 import com.deanwaylabs.quietos.network.relay.FirebaseRelay
+import com.deanwaylabs.quietos.network.relay.MissedCallObserver
+import com.deanwaylabs.quietos.network.relay.RelayFeed
 import com.deanwaylabs.quietos.network.relay.RelayRouter
 import com.deanwaylabs.quietos.network.spamshield.SpamShield
 import com.deanwaylabs.quietos.network.token.Bucket
@@ -37,6 +39,7 @@ class NetworkManager private constructor(private val appContext: Context) {
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_CHANNEL_KEY = "channel_key_hex"
         private const val KEY_DEVICE_NAME = "device_name"
+        private const val KEY_PAIRED_PEER_ID = "paired_peer_id"
 
         @Volatile
         private var instance: NetworkManager? = null
@@ -75,6 +78,45 @@ class NetworkManager private constructor(private val appContext: Context) {
     /** True when the cloud relay is configured and listening. */
     val isCloudRelayActive: Boolean get() = firebaseRelay?.isListening == true
 
+    /** Missed-call observer for relay mode (Phone B). */
+    private var missedCallObserver: MissedCallObserver? = null
+
+    /** True when this device is the home relay phone. */
+    val isRelayMode: Boolean get() = RelayFeed.isRelayMode(appContext)
+
+    /**
+     * Turn relay mode on/off. When on, this device acts as the home
+     * phone: missed calls and inbound SMS are fed through SPAM SHIELD
+     * and relayed to the paired phone. The missed-call observer is
+     * started/stopped with the mode.
+     */
+    fun setRelayMode(enabled: Boolean) {
+        RelayFeed.setRelayMode(appContext, enabled)
+        if (enabled) {
+            startMissedCallObserver()
+        } else {
+            stopMissedCallObserver()
+        }
+    }
+
+    private fun startMissedCallObserver() {
+        if (missedCallObserver != null) return
+        try {
+            missedCallObserver = MissedCallObserver.register(appContext)
+        } catch (_: Exception) {
+            // READ_CALL_LOG not granted yet — Hub will prompt.
+        }
+    }
+
+    private fun stopMissedCallObserver() {
+        missedCallObserver?.let {
+            try {
+                appContext.contentResolver.unregisterContentObserver(it)
+            } catch (_: Exception) {}
+        }
+        missedCallObserver = null
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** (deviceId, connected) */
@@ -90,8 +132,30 @@ class NetworkManager private constructor(private val appContext: Context) {
     val isRunning: Boolean get() = node?.isRunning == true
     val peerIds: List<String> get() = node?.peerIds ?: emptyList()
 
+    /**
+     * The peer to relay to. In the two-phone setup this is the only
+     * peer; with more peers it's the first connected one.
+     * Null when no peer is on the local socket (relay goes to cloud).
+     */
+    val primaryPeerId: String? get() = peerIds.firstOrNull()
+
+    /**
+     * The paired peer's device ID for cloud addressing.
+     * Returns the live peer if connected, else the last-seen peer ID
+     * from prefs (so cloud envelopes can be addressed when the peer
+     * is on a different network).
+     */
+    fun pairedPeerId(): String? =
+        primaryPeerId ?: prefs.getString(KEY_PAIRED_PEER_ID, null)
+
+    private fun savePairedPeerId(peerId: String) {
+        prefs.edit().putString(KEY_PAIRED_PEER_ID, peerId).apply()
+    }
+
     init {
         restoreDevice()
+        // Resume relay mode if it was on (e.g. after reboot).
+        if (isRelayMode) startMissedCallObserver()
     }
 
     // -- pairing ----------------------------------------------------------
@@ -115,6 +179,7 @@ class NetworkManager private constructor(private val appContext: Context) {
     fun unpair() {
         stop()
         stopCloudRelay()
+        stopMissedCallObserver()
         prefs.edit().clear().apply()
         device = null
         node = null
@@ -258,6 +323,7 @@ class NetworkManager private constructor(private val appContext: Context) {
         if (node?.isRunning == true) return true
         val n = NetworkNode(device = d, port = port, tokens = tokens)
         n.onPeer = { peerId, connected ->
+            if (connected) savePairedPeerId(peerId)
             onPeerChanged?.invoke(peerId, connected)
         }
         n.onEvent = { eventType, payload, fromDevice ->
@@ -328,6 +394,7 @@ class NetworkManager private constructor(private val appContext: Context) {
             append("Node: ${if (isRunning) "RUNNING" else "stopped"}\n")
             append("Peers: ${if (peers.isEmpty()) "none" else peers.joinToString(", ") { it.take(8) }}\n")
             append("Cloud relay: ${if (isCloudRelayActive) "LIVE" else "off"}\n")
+            append("Relay mode: ${if (isRelayMode) "ON (home phone)" else "off"}\n")
             if (pending > 0) append("Outbox: $pending queued\n")
         }
     }

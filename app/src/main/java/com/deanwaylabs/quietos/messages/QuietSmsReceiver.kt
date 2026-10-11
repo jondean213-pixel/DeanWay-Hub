@@ -11,6 +11,8 @@ import android.os.Build
 import android.provider.Telephony
 import androidx.core.app.NotificationCompat
 import com.deanwaylabs.quietos.MainActivity
+import com.deanwaylabs.quietos.network.relay.RelayFeed
+import com.deanwaylabs.quietos.network.spamshield.RelayDecision
 
 class QuietSmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -48,6 +50,22 @@ class QuietSmsReceiver : BroadcastReceiver() {
             put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_INBOX)
         }
         runCatching { context.contentResolver.insert(Telephony.Sms.Inbox.CONTENT_URI, values) }
+
+        // Network relay: if this is the home phone (Phone B), SPAM SHIELD
+        // decides whether the carried phone should see this text.
+        // Runs on a background thread — the shield does contact lookups.
+        if (RelayFeed.isRelayMode(context)) {
+            Thread {
+                try {
+                    val decision = RelayFeed.onInboundSms(context, sender, body)
+                    // HOLD = spam, stays home. RELAY/RELAY_FLAGGED already sent.
+                    if (decision == RelayDecision.HOLD) {
+                        // Optionally log: spam held on home phone.
+                    }
+                } catch (_: Exception) { /* relay must never crash SMS */ }
+            }.apply { isDaemon = true; start() }
+        }
+
         notifyCleanMessage(context, sender, body)
     }
 

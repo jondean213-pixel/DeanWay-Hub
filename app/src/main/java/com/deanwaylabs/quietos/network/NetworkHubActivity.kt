@@ -195,8 +195,7 @@ class NetworkHubActivity : AppCompatActivity() {
         root.addView(button("Connect to peer (IP)") { showConnect() })
 
         // -- Cloud relay (forgotten-phone path) --
-        root.addView(label("Cloud Relay", 14f, GOLD, bold = true))
-        val cloudRow = LinearLayout(this).apply {
+        root.addView(label("Cloud Relay", 14f, GOLD, bold = true))        val cloudRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
         cloudRow.addView(button("Start cloud relay") {
@@ -223,6 +222,18 @@ class NetworkHubActivity : AppCompatActivity() {
         root.addView(label(
             "Phone B at home + cloud relay on = missed calls & texts " +
             "reach you anywhere. Firebase setup required (one time).",
+            12f, TEXT_DIM))
+
+        // -- Relay mode (this device is the home phone) --
+        root.addView(label("Relay Mode", 14f, GOLD, bold = true))
+        val relayModeButton = button("") { toggleRelayMode() }
+        root.addView(relayModeButton)
+        // Store for refresh
+        relayModeButton.tag = "relay_mode_button"
+        root.addView(label(
+            "ON = this phone takes calls/texts and relays them through " +
+            "SPAM SHIELD. Turn ON on Phone B, leave OFF on the phone " +
+            "you carry.",
             12f, TEXT_DIM))
 
         // -- Guardian module --
@@ -280,6 +291,60 @@ class NetworkHubActivity : AppCompatActivity() {
         val peers = manager.peerIds
         peerText.text = if (peers.isEmpty()) "No peers connected"
             else "Peers: ${peers.joinToString(", ") { it.take(12) }}"
+        updateRelayModeButton()
+    }
+
+    private fun updateRelayModeButton() {
+        val root = findViewById<android.view.ViewGroup>(android.R.id.content)
+        val btn = findTaggedButton(root, "relay_mode_button")
+        btn?.text = if (manager.isRelayMode)
+            "Relay Mode: ON (this is the home phone)"
+        else
+            "Relay Mode: OFF"
+    }
+
+    private fun findTaggedButton(view: android.view.View, tag: String): Button? {
+        if (view is Button && view.tag == tag) return view
+        if (view is android.view.ViewGroup) {
+            for (i in 0 until view.childCount) {
+                findTaggedButton(view.getChildAt(i), tag)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun toggleRelayMode() {
+        val nowOn = !manager.isRelayMode
+        if (nowOn) {
+            // Relay mode needs call-log access for missed-call detection.
+            if (checkSelfPermission(android.Manifest.permission.READ_CALL_LOG) !=
+                android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(
+                    arrayOf(android.Manifest.permission.READ_CALL_LOG), 42)
+                log("Relay mode: requesting call-log permission…")
+                return
+            }
+        }
+        manager.setRelayMode(nowOn)
+        log(if (nowOn) "Relay mode ON — this phone now relays via SPAM SHIELD."
+            else "Relay mode OFF.")
+        refreshStatus()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 42) {
+            if (grantResults.firstOrNull() ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                manager.setRelayMode(true)
+                log("Relay mode ON — this phone now relays via SPAM SHIELD.")
+            } else {
+                log("Relay mode needs call-log access to detect missed calls.")
+            }
+            refreshStatus()
+        }
     }
 
     private fun log(line: String) {
