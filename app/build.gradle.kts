@@ -27,9 +27,10 @@ android {
         }
         create("phoneB") {
             dimension = "device"
-            applicationIdSuffix = ".phoneb"
             versionNameSuffix = "-phoneB"
             // No ndk abiFilters and no LiteRT: pure Kotlin/Java.
+            // Same applicationId as motorola — the APKs live on
+            // different phones, no conflict.
         }
     }
     compileOptions {
