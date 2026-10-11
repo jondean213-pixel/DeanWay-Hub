@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -40,5 +41,12 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.17.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // Firebase: cloud relay transport (Realtime Database) + push wake-up (FCM).
+    // The relay envelopes are AES-256-GCM sealed before they touch Firebase —
+    // Google only ever sees ciphertext.
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-database-ktx")
+    implementation("com.google.firebase:firebase-messaging-ktx")
+    implementation("com.google.firebase:firebase-auth-ktx")
     testImplementation("junit:junit:4.13.2")
 }

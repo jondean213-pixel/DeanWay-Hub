@@ -5,11 +5,16 @@ import android.content.SharedPreferences
 import com.deanwaylabs.quietos.network.guardian.GuardianModule
 import com.deanwaylabs.quietos.network.pairing.PairedDevice
 import com.deanwaylabs.quietos.network.pairing.newPairingCode
+import com.deanwaylabs.quietos.network.relay.FirebaseRelay
 import com.deanwaylabs.quietos.network.relay.RelayRouter
 import com.deanwaylabs.quietos.network.spamshield.SpamShield
 import com.deanwaylabs.quietos.network.token.Bucket
 import com.deanwaylabs.quietos.network.token.TokenCoordinator
 import com.deanwaylabs.quietos.network.transport.NetworkNode
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 /**
@@ -63,6 +68,15 @@ class NetworkManager private constructor(private val appContext: Context) {
     var guardian: GuardianModule? = null
         private set
 
+    /** Firebase cloud relay (null until startCloudRelay succeeds). */
+    var firebaseRelay: FirebaseRelay? = null
+        private set
+
+    /** True when the cloud relay is configured and listening. */
+    val isCloudRelayActive: Boolean get() = firebaseRelay?.isListening == true
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     /** (deviceId, connected) */
     var onPeerChanged: ((String, Boolean) -> Unit)? = null
 
@@ -100,11 +114,13 @@ class NetworkManager private constructor(private val appContext: Context) {
     /** Forget the pairing (unpair). Stops the node first. */
     fun unpair() {
         stop()
+        stopCloudRelay()
         prefs.edit().clear().apply()
         device = null
         node = null
         relay = null
         guardian = null
+        firebaseRelay = null
     }
 
     private fun persistDevice(d: PairedDevice) {
@@ -150,15 +166,85 @@ class NetworkManager private constructor(private val appContext: Context) {
     private fun rewireRelay() {
         val d = device ?: return
         val n = node
-        relay = RelayRouter(
+        val r = RelayRouter(
             device = d,
             shield = shield,
             node = n,
-            pushSend = null,  // Firebase push: future work
+            pushSend = null,  // set below when Firebase is ready
             onRelayEvent = { eventType, payload, fromDevice ->
                 onRelayDelivery?.invoke(eventType, payload, fromDevice)
             }
         )
+        // If the Firebase relay is already up, hook it into the new router.
+        firebaseRelay?.let { fb ->
+            r.pushSend = { envelope -> fb.pushSendBlocking(envelope) }
+        }
+        relay = r
+    }
+
+    // -- cloud relay (Firebase) -------------------------------------------
+
+    /**
+     * Start the Firebase cloud relay for forgotten-phone operation.
+     *
+     * This is what makes the relay work when the two phones are on
+     * different networks: Phone B writes sealed envelopes to Firebase,
+     * the carried phone picks them up.
+     *
+     * Requires google-services.json in the app (Jon creates the Firebase
+     * project once — see FIREBASE_SETUP.md). If Firebase isn't
+     * configured, this no-ops gracefully and local Wi-Fi still works.
+     *
+     * The callback receives true on success, false with a reason on failure.
+     */
+    fun startCloudRelay(done: (Boolean, String) -> Unit = { _, _ -> }) {
+        val d = device
+        if (d == null) {
+            done(false, "Pair this device first.")
+            return
+        }
+        if (firebaseRelay?.isListening == true) {
+            done(true, "Cloud relay already running.")
+            return
+        }
+        scope.launch {
+            try {
+                // Anonymous auth: each install gets a stable UID, no
+                // account management needed.
+                val authed = FirebaseRelay.ensureAuth()
+                if (!authed) {
+                    done(false, "Firebase auth failed. Check google-services.json.")
+                    return@launch
+                }
+                val r = relay ?: run {
+                    rewireRelay()
+                    relay
+                } ?: run {
+                    done(false, "Relay router not ready.")
+                    return@launch
+                }
+                val fb = FirebaseRelay(router = r, ownDeviceId = d.deviceId)
+                fb.startListening()
+                firebaseRelay = fb
+                // Hook the push path into the live router.
+                r.pushSend = { envelope -> fb.pushSendBlocking(envelope) }
+                // Flush any envelopes queued while Firebase was down.
+                r.retryDue()
+                done(true, "Cloud relay live.")
+            } catch (e: Exception) {
+                // Most likely: google-services.json missing (Firebase
+                // not configured yet). Local Wi-Fi is unaffected.
+                done(false, "Firebase not configured: ${e.message}")
+            }
+        }
+    }
+
+    /** Stop the Firebase cloud relay listener. */
+    fun stopCloudRelay() {
+        firebaseRelay?.stopListening()
+        firebaseRelay = null
+        // Unhook push; the router falls back to queueing.
+        relay?.pushSend = null
     }
 
     // -- node lifecycle ---------------------------------------------------
@@ -197,6 +283,12 @@ class NetworkManager private constructor(private val appContext: Context) {
         node = null
     }
 
+    /** Full stop: local node + cloud relay. */
+    fun stopAll() {
+        stop()
+        stopCloudRelay()
+    }
+
     /** Dial a peer by IP. Throws on handshake failure. */
     fun connectTo(host: String, port: Int = com.deanwaylabs.quietos.network.transport.DEFAULT_PORT) {
         val n = node ?: throw IllegalStateException("Network node not started")
@@ -229,11 +321,14 @@ class NetworkManager private constructor(private val appContext: Context) {
         val d = device
         if (d == null) return "Not paired"
         val peers = peerIds
+        val pending = relay?.outboxPending()?.size ?: 0
         return buildString {
             append("Paired as ${d.displayName} (${d.deviceId.take(8)}…)\n")
             append("Key: ${d.keyId}\n")
             append("Node: ${if (isRunning) "RUNNING" else "stopped"}\n")
-            append("Peers: ${if (peers.isEmpty()) "none" else peers.joinToString(", ") { it.take(8) }}")
+            append("Peers: ${if (peers.isEmpty()) "none" else peers.joinToString(", ") { it.take(8) }}\n")
+            append("Cloud relay: ${if (isCloudRelayActive) "LIVE" else "off"}\n")
+            if (pending > 0) append("Outbox: $pending queued\n")
         }
     }
 }

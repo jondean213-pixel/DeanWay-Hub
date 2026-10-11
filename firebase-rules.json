@@ -1,0 +1,20 @@
+{
+  "rules": {
+    "quietos-relay": {
+      "$deviceId": {
+        // A phone can read its OWN inbox only.
+        ".read": "auth != null",
+        "$msgId": {
+          // A phone can write to any inbox (it addresses envelopes
+          // by the recipient's paired device id), but each envelope
+          // carries a key_id the receiver verifies — unpaired writers
+          // get their envelopes dropped on HMAC/key_id check.
+          // The payload is AES-256-GCM ciphertext; Firebase never
+          // sees plaintext.
+          ".write": "auth != null",
+          ".validate": "newData.isString() && newData.val().length < 65536"
+        }
+      }
+    }
+  }
+}

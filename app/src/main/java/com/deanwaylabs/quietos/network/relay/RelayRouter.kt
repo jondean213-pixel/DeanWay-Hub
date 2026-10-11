@@ -299,9 +299,11 @@ class RelayRouter(
     private val shield: SpamShield,
     private val node: NetworkNode? = null,
     /** Returns true when the push service accepted the envelope. */
-    private val pushSend: ((JSONObject) -> Boolean)? = null,
+    pushSend: ((JSONObject) -> Boolean)? = null,
     private val onRelayEvent: ((String, JSONObject, String) -> Unit)? = null
 ) {
+    /** Swappable push hook — NetworkManager sets the Firebase transport here. */
+    var pushSend: ((JSONObject) -> Boolean)? = pushSend
     private val outbox = mutableMapOf<String, OutboxEntry>()
     private val seen = mutableMapOf<String, Double>()  // msg_id -> first-seen
     private val lock = Any()

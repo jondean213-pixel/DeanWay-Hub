@@ -194,6 +194,37 @@ class NetworkHubActivity : AppCompatActivity() {
         root.addView(netRow)
         root.addView(button("Connect to peer (IP)") { showConnect() })
 
+        // -- Cloud relay (forgotten-phone path) --
+        root.addView(label("Cloud Relay", 14f, GOLD, bold = true))
+        val cloudRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        cloudRow.addView(button("Start cloud relay") {
+            manager.startCloudRelay { ok, msg ->
+                runOnUiThread {
+                    log("Cloud relay: $msg")
+                    refreshStatus()
+                }
+            }
+            log("Cloud relay: starting…")
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        cloudRow.addView(button("Stop cloud") {
+            manager.stopCloudRelay()
+            log("Cloud relay stopped.")
+            refreshStatus()
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        root.addView(cloudRow)
+        root.addView(label(
+            "Phone B at home + cloud relay on = missed calls & texts " +
+            "reach you anywhere. Firebase setup required (one time).",
+            12f, TEXT_DIM))
+
         // -- Guardian module --
         root.addView(button("Guardian Module") { showGuardian() })
 
