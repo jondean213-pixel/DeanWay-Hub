@@ -12,6 +12,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Inject real google-services.json (if repo secret present)
+        # The repo keeps a PLACEHOLDER google-services.json committed so
+        # public builds stay key-free. If Jon sets the FIREBASE_GOOGLE_SERVICES
+        # repo secret (the real file contents, pasted once), CI swaps it in
+        # for the build — the key never touches git history.
+        run: |
+          if [ -n "${{ secrets.FIREBASE_GOOGLE_SERVICES }}" ]; then
+            printf '%s' "${{ secrets.FIREBASE_GOOGLE_SERVICES }}" > app/google-services.json
+            echo "Injected real google-services.json from repo secret."
+          else
+            echo "No FIREBASE_GOOGLE_SERVICES secret — building with placeholder (cloud relay will report 'not configured')."
+          fi
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

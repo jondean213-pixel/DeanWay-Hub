@@ -29,6 +29,13 @@ com.deanwaylabs.quietos
 5. Click **Register app**
 
 ### 3. Download google-services.json
+
+> **Do step 4 (create the database) FIRST if you haven't yet.** Firebase
+> only writes the database URL into this file once a database exists —
+> a JSON downloaded before the database was created won't have it, and
+> the app will report "Firebase not configured". If that already
+> happened, just download the file again after step 4.
+
 1. On the next screen, click **Download google-services.json**
 2. Get that file to the bench — send it to Roman (or place it yourself):
 ```
@@ -77,8 +84,10 @@ easily (a few hundred small writes a day is nothing).
 
 ## If something breaks
 
-- "Firebase not configured" in the Hub log → `google-services.json`
-  isn't in `app/` or the package name doesn't match
+- "Firebase not configured" in the Hub log →
+  `google-services.json` isn't in `app/`, the package name doesn't match,
+  **or it was downloaded before the database was created** (step 3 note —
+  re-download after step 4)
 - "Firebase auth failed" → Anonymous sign-in isn't enabled (step 6)
 - "Permission denied" writing → database rules aren't published (step 5)
 - Local Wi-Fi still works fine without any of this — the cloud relay
