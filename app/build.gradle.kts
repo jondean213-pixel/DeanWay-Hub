@@ -40,6 +40,9 @@ android {
     buildTypes {
         release { isMinifyEnabled = false }
     }
+    buildFeatures {
+        buildConfig = true
+    }
 }
 
 kotlin {

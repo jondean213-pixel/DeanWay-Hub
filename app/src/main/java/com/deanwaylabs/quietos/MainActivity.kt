@@ -52,6 +52,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Motorola flavor: the neon Network hub IS the app — open straight
+        // into it, no "Open Network Hub" step. (Jon, 2026-10-12: "I want it
+        // on start up.") Phone B keeps this MainActivity as its launcher.
+        // NetworkHubActivity resolves per-variant from the flavor source sets.
+        if (BuildConfig.FLAVOR == "motorola") {
+            startActivity(Intent(this,
+                com.deanwaylabs.quietos.network.NetworkHubActivity::class.java))
+            finish()
+            return
+        }
         title = "QuietOS"
         setContentView(buildUi())
         lifecycleScope.launch { autoLoadExistingModel() }
