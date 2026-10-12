@@ -17,9 +17,13 @@ jobs:
         # public builds stay key-free. If Jon sets the FIREBASE_GOOGLE_SERVICES
         # repo secret (the real file contents, pasted once), CI swaps it in
         # for the build — the key never touches git history.
+        # NOTE: the secret is passed via env (not inline ${{ }}) because
+        # inline interpolation mangles multiline JSON.
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_GOOGLE_SERVICES }}
         run: |
-          if [ -n "${{ secrets.FIREBASE_GOOGLE_SERVICES }}" ]; then
-            printf '%s' "${{ secrets.FIREBASE_GOOGLE_SERVICES }}" > app/google-services.json
+          if [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
             echo "Injected real google-services.json from repo secret."
           else
             echo "No FIREBASE_GOOGLE_SERVICES secret — building with placeholder (cloud relay will report 'not configured')."
