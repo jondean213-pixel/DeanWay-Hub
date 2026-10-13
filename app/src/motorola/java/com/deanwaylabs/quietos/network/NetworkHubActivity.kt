@@ -1,6 +1,8 @@
 package com.deanwaylabs.quietos.network
 
+import android.animation.ValueAnimator
 import android.app.AlertDialog
+import android.app.Dialog
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -11,14 +13,18 @@ import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
+import android.view.Window
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -54,7 +60,7 @@ import kotlin.math.min
 import kotlin.random.Random
 
 /**
- * QuietOS Network Hub — MOTOROLA flavor, build #4.
+ * QuietOS Network Hub — MOTOROLA flavor, build #5.
  *
  * FAITHFUL recreation of Jon's concept graphic (1230x1278, square).
  * Zero rearrangement: the top of the page is a "GraphicStage" — a
@@ -65,9 +71,19 @@ import kotlin.random.Random
  * connection lines, DIGEST/QUIET/SPAM SHIELD panels, footer — exactly
  * the graphic's composition.
  *
+ * Build #5 fixes (Jon field test 2026-10-12):
+ * - Panels refresh live: onResume re-reads every bucket, plus a 5s
+ *   Handler loop while resumed — captures land in panels as they arrive.
+ * - "email"/"mail" added to every Messages tab filter; each bucket's
+ *   DEFAULT tab is a show-all tab (NOW→Alerts, DIGEST→All) so no captured
+ *   item is ever invisible.
+ * - Node taps are unmistakable: pulse + smooth-scroll panel to center +
+ *   neon border flash.
+ * - Tapping a workspace panel opens a full-screen expanded view: full tab
+ *   row, full list (up to 50), same neon styling, CLOSE button.
+ *
  * Below the stage: the required phone controls absent from the graphic
- * (NETWORK panel, SYSTEM panel) in the same neon style. Node taps pulse
- * their adjacent panel — everything is already visible, nothing hides.
+ * (NETWORK panel, SYSTEM panel) in the same neon style.
  *
  * Flavor override of NetworkHubActivity (same package + class name; the
  * class lives ONLY in flavor source sets, never in main — AGP treats a
@@ -100,20 +116,22 @@ class NetworkHubActivity : AppCompatActivity() {
         val tagline: String,
         val accent: Int,
         val tabs: List<String>,
-        val actionLabel: String
+        val actionLabel: String,
+        /** Default tab: the one that shows EVERY captured item (never a filter). */
+        val defaultTab: String
     )
 
     private val buckets = listOf(
         BucketUi("now", "NOW", "HANDLE IT NOW", GREEN,
-            listOf("Calls", "Messages", "Alerts", "Apps"), "Clear Completed"),
+            listOf("Calls", "Messages", "Alerts", "Apps"), "Clear Completed", "Alerts"),
         BucketUi("soon", "SOON", "FOR LATER", ORANGE,
-            listOf("Scheduled", "Snoozed", "Follow Up", "Later"), "Add to SOON"),
+            listOf("Scheduled", "Snoozed", "Follow Up", "Later"), "Add to SOON", "Scheduled"),
         BucketUi("digest", "DIGEST", "BATCH & REVIEW", BLUE,
-            listOf("All", "Calls", "Messages", "Apps", "Social"), "Mark as Read"),
+            listOf("All", "Calls", "Messages", "Apps", "Social"), "Mark as Read", "All"),
         BucketUi("quiet", "QUIET", "KEEP IT SILENT", PURPLE,
-            listOf("Blocked", "Filtered", "Settings"), "View Block List"),
+            listOf("Blocked", "Filtered", "Settings"), "View Block List", "Blocked"),
         BucketUi("spam", "SPAM SHIELD", "BLOCK • LOG • PROTECT", RED,
-            listOf("Calls", "Block List", "Logs", "Settings"), "Manage Spam Protection")
+            listOf("Calls", "Block List", "Logs", "Settings"), "Manage Spam Protection", "Calls")
     )
 
     private val bucketIcons = mapOf(
@@ -142,6 +160,17 @@ class NetworkHubActivity : AppCompatActivity() {
     private val stageNodes = mutableMapOf<String, View>()
     private val stageHosts = mutableMapOf<String, LinearLayout>()
     private val stageTabs = mutableMapOf<String, Int>()
+    private var spamTodayText: TextView? = null
+    private var spamTotalText: TextView? = null
+
+    /** Live panel refresh: re-reads sources every 5s while resumed. */
+    private val refreshHandler = Handler(Looper.getMainLooper())
+    private val refreshRunnable = object : Runnable {
+        override fun run() {
+            refreshAllStageBuckets()
+            refreshHandler.postDelayed(this, 5000)
+        }
+    }
 
     // inline NETWORK panel refs
     private var netStatusText: TextView? = null
@@ -284,6 +313,7 @@ class NetworkHubActivity : AppCompatActivity() {
         }
         private val rect = RectF()
         private val radius = dpf(18f)
+        private var flashBoost = 0f
 
         init {
             setWillNotDraw(false)
@@ -291,11 +321,22 @@ class NetworkHubActivity : AppCompatActivity() {
             orientation = VERTICAL
         }
 
+        /** Brief border flash — used to acknowledge a node tap. */
+        fun flashBorder() {
+            val anim = ValueAnimator.ofFloat(0f, 1f, 0f)
+            anim.duration = 650
+            anim.addUpdateListener {
+                flashBoost = it.animatedValue as Float
+                invalidate()
+            }
+            anim.start()
+        }
+
         override fun onDraw(canvas: Canvas) {
             val pad = dpf(11f)
             rect.set(pad, pad, width - pad, height - pad)
-            glowPaint.strokeWidth = dpf(2.5f)
-            glowPaint.setShadowLayer(dpf(10f), 0f, 0f, accent)
+            glowPaint.strokeWidth = dpf(2.5f + 2.5f * flashBoost)
+            glowPaint.setShadowLayer(dpf(10f + 18f * flashBoost), 0f, 0f, accent)
             canvas.drawRoundRect(rect, radius, radius, glowPaint)
             glowPaint.clearShadowLayer()
             canvas.drawRoundRect(rect, radius, radius, fillPaint)
@@ -610,7 +651,7 @@ class NetworkHubActivity : AppCompatActivity() {
             val node = buildStageNode(b)
             stageNodes[b.key] = node
             stage.addView(node, stage.PParams(r[0], r[1], r[2], r[3]))
-            node.setOnClickListener { pulsePanel(b.key) }
+            node.setOnClickListener { onNodeTap(b.key) }
         }
 
         // ---- 5. Gemma medallion, center ----
@@ -729,6 +770,30 @@ class NetworkHubActivity : AppCompatActivity() {
         return node
     }
 
+    /** Node tap: unmistakable — pulse, smooth-scroll its panel to center, border flash. */
+    private fun onNodeTap(key: String) {
+        pulsePanel(key)
+        stagePanels[key]?.flashBorder()
+        scrollPanelToCenter(key)
+    }
+
+    /** Smooth-scrolls the page so the tapped bucket's panel sits centered on screen. */
+    private fun scrollPanelToCenter(key: String) {
+        val panel = stagePanels[key] ?: return
+        val scroll = pageScroll ?: return
+        panel.post {
+            val content = if (scroll.childCount > 0) scroll.getChildAt(0) else null
+            var top = 0
+            var v: View? = panel
+            while (v != null && v !== content && v !== scroll) {
+                top += v.top
+                v = v.parent as? View
+            }
+            val target = (top - (scroll.height - panel.height) / 2).coerceAtLeast(0)
+            scroll.smoothScrollTo(0, target)
+        }
+    }
+
     /** Node tap: pulse its adjacent panel (everything is already visible). */
     private fun pulsePanel(key: String) {
         val panel = stagePanels[key] ?: return
@@ -792,15 +857,14 @@ class NetworkHubActivity : AppCompatActivity() {
                 gravity = Gravity.CENTER
                 setPadding(0, dp(4), 0, dp(2))
             }
-            val entries = spamEntries()
-            val today = startOfToday()
-            val blockedToday = entries.count { it.timeMs >= today }
-            stats.addView(compactStat("Blocked\nToday", blockedToday.toString()))
-            stats.addView(compactStat("Total\nBlocked", entries.size.toString()))
+            stats.addView(compactStat("Blocked\nToday", "0") { spamTodayText = it })
+            stats.addView(compactStat("Total\nBlocked", "0") { spamTotalText = it })
             card.addView(stats)
+            refreshSpamStats()
         } else {
             // tabs (first 3, like the graphic's pill row)
             val tabs = b.tabs.take(3)
+            val defaultIdx = tabs.indexOf(b.defaultTab).takeIf { it >= 0 } ?: 0
             val tabScroll = HorizontalScrollView(this).apply {
                 isHorizontalScrollBarEnabled = false
                 setPadding(0, dp(5), 0, dp(5))
@@ -831,7 +895,7 @@ class NetworkHubActivity : AppCompatActivity() {
                         .apply { marginEnd = dp(6) }
                 })
             }
-            pills.forEachIndexed { j, p -> stylePill(p, j == 0, b.accent) }
+            pills.forEachIndexed { j, p -> stylePill(p, j == defaultIdx, b.accent) }
             tabScroll.addView(tabRow)
             card.addView(tabScroll)
 
@@ -840,7 +904,7 @@ class NetworkHubActivity : AppCompatActivity() {
                 orientation = LinearLayout.VERTICAL
             }
             stageHosts[b.key] = host
-            stageTabs[b.key] = 0
+            stageTabs[b.key] = defaultIdx
             card.addView(host)
             refreshStageBucket(b)
         }
@@ -864,10 +928,17 @@ class NetworkHubActivity : AppCompatActivity() {
             setOnClickListener { onBucketAction(b) }
         }
         card.addView(action)
+
+        // tap the panel → full-screen expanded view (enlargement overlay;
+        // the dashboard behind stays as-is, nothing is hidden or replaced)
+        card.isClickable = true
+        card.isFocusable = true
+        card.setOnClickListener { showExpandedBucket(b) }
         return card
     }
 
-    private fun compactStat(label: String, value: String): LinearLayout =
+    private fun compactStat(label: String, value: String,
+                            onValue: (TextView) -> Unit = {}): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -885,6 +956,7 @@ class NetworkHubActivity : AppCompatActivity() {
                 setTextColor(TEXT)
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
+                onValue(this)
             })
         }
 
@@ -927,42 +999,107 @@ class NetworkHubActivity : AppCompatActivity() {
         host.removeAllViews()
         val tabs = b.tabs.take(3)
         val tabName = tabs.getOrElse(tab) { "" }
-        when (b.key) {
-            "now" -> {
-                val keys = when (tabName) {
-                    "Calls" -> listOf("call", "phone", "missed")
-                    "Messages" -> listOf("message", "sms", "text", "mms")
-                    else -> emptyList() // Alerts: show all
-                }
-                val items = filterItems(nowItems(), keys).take(STAGE_ROWS)
-                if (items.isEmpty()) host.addView(compactEmpty())
-                else items.forEach { host.addView(stageRow(it.title, b.accent)) }
-            }
-            "soon" -> host.addView(compactEmpty("Nothing scheduled yet."))
-            "digest" -> {
-                val keys = when (tabName) {
-                    "Calls" -> listOf("call", "phone")
-                    "Messages" -> listOf("message", "sms", "text")
-                    else -> emptyList() // All: show all
-                }
-                val items = filterItems(digestItems(), keys).take(STAGE_ROWS)
-                if (items.isEmpty()) host.addView(compactEmpty())
-                else items.forEach { host.addView(stageRow(it.title, b.accent)) }
-            }
-            "quiet" -> when (tabName) {
-                "Blocked" -> {
-                    val items = spamEntries().take(STAGE_ROWS)
-                    if (items.isEmpty()) host.addView(compactEmpty("Nothing blocked yet."))
-                    else items.forEach { host.addView(stageRow(it.title, b.accent)) }
-                }
-                "Filtered" -> {
-                    val items = quietItems().take(STAGE_ROWS)
-                    if (items.isEmpty()) host.addView(compactEmpty())
-                    else items.forEach { host.addView(stageRow(it.title, b.accent)) }
-                }
-                else -> host.addView(compactEmpty("QUIET keeps it silent."))
+        bucketListViews(b, tabName, STAGE_ROWS, detailed = false)
+            .forEach { host.addView(it) }
+    }
+
+    /**
+     * Tab keyword filters. "email"/"mail" are included in every Messages
+     * list so a captured email is never filtered out of every tab.
+     * An empty key list means "show all" (Alerts, All, Apps, Social...).
+     */
+    private fun bucketTabKeys(b: BucketUi, tabName: String): List<String> = when (b.key) {
+        "now" -> when (tabName) {
+            "Calls" -> listOf("call", "phone", "missed")
+            "Messages" -> listOf("message", "sms", "text", "mms", "email", "mail")
+            else -> emptyList()
+        }
+        "digest" -> when (tabName) {
+            "Calls" -> listOf("call", "phone")
+            "Messages" -> listOf("message", "sms", "text", "email", "mail")
+            else -> emptyList()
+        }
+        else -> emptyList()
+    }
+
+    /**
+     * Row views for a bucket + tab. Shared by the compact stage panel and
+     * the full-screen expanded view. `detailed` adds the subtitle line.
+     */
+    private fun bucketListViews(b: BucketUi, tabName: String, limit: Int,
+                                detailed: Boolean): List<View> {
+        val views = mutableListOf<View>()
+        fun addItems(items: List<ItemRow>) {
+            if (items.isEmpty()) views += compactEmpty()
+            else items.forEach {
+                views += if (detailed) detailRow(it.title, it.sub, b.accent)
+                else stageRow(it.title, b.accent)
             }
         }
+        fun addSpam(items: List<SpamEntry>) {
+            if (items.isEmpty()) views += compactEmpty("Nothing blocked yet.")
+            else items.forEach {
+                views += if (detailed) detailRow(it.title, it.sub, b.accent)
+                else stageRow(it.title, b.accent)
+            }
+        }
+        when (b.key) {
+            "now" -> addItems(filterItems(nowItems(), bucketTabKeys(b, tabName)).take(limit))
+            "soon" -> views += compactEmpty("Nothing scheduled yet.")
+            "digest" -> addItems(filterItems(digestItems(), bucketTabKeys(b, tabName)).take(limit))
+            "quiet" -> when (tabName) {
+                "Blocked" -> addSpam(spamEntries().take(limit))
+                "Filtered" -> addItems(quietItems().take(limit))
+                else -> views += compactEmpty("QUIET keeps it silent.")
+            }
+            "spam" -> addSpam(spamEntries().take(limit))
+        }
+        return views
+    }
+
+    /** Two-line data row for the expanded view: title + subtitle. */
+    private fun detailRow(title: String, sub: String, accent: Int): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(120, 20, 28, 50))
+                cornerRadius = dp(8).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { bottomMargin = dp(6) }
+        }
+        row.addView(TextView(this).apply {
+            text = title
+            textSize = 14f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+        })
+        if (sub.isNotBlank()) row.addView(TextView(this).apply {
+            text = sub
+            textSize = 12f
+            setTextColor(DIM)
+            setPadding(0, dp(2), 0, 0)
+        })
+        return row
+    }
+
+    /** Re-reads the spam log into the stage SPAM SHIELD stats. */
+    private fun refreshSpamStats() {
+        val entries = spamEntries()
+        spamTodayText?.text = entries.count { it.timeMs >= startOfToday() }.toString()
+        spamTotalText?.text = entries.size.toString()
+    }
+
+    /** Re-reads all live sources into every stage panel. Safe to call repeatedly. */
+    private fun refreshAllStageBuckets() {
+        for (b in buckets) {
+            if (b.key == "spam") refreshSpamStats()
+            else refreshStageBucket(b)
+        }
+        refreshAttentionStatus()
     }
 
     private fun compactEmpty(text: String = "Nothing here yet."): View =
@@ -976,6 +1113,133 @@ class NetworkHubActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT)
         }
+
+    // ================= expanded workspace view =================
+
+    /**
+     * Full-screen expanded view of a workspace panel (enlargement overlay).
+     * Same bucket, FULL tab row (all tabs), FULL list (up to 50), same neon
+     * styling, clear CLOSE button. The dashboard behind is untouched —
+     * nothing is hidden or replaced. Tapping a tab filters in place.
+     */
+    private fun showExpandedBucket(b: BucketUi) {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(0x05, 0x05, 0x10))
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+        }
+        val card = NeonPanelView(this, b.accent).apply {
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT)
+        }
+
+        card.addView(TextView(this).apply {
+            text = "${b.title} Workspace"
+            textSize = 20f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(2))
+        })
+        card.addView(centerLabel(b.tagline, 11f, b.accent).apply {
+            letterSpacing = 0.2f
+            setPadding(0, 0, 0, dp(8))
+        })
+
+        // full tab row (ALL tabs, not just the stage's first 3)
+        val tabScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 0, 0, dp(8))
+        }
+        val tabRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val listHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        var selTab = b.tabs.indexOf(b.defaultTab).takeIf { it >= 0 } ?: 0
+        val pills = mutableListOf<TextView>()
+        fun renderList() {
+            listHost.removeAllViews()
+            val tabName = b.tabs.getOrElse(selTab) { "" }
+            if (b.key == "spam") {
+                val entries = spamEntries()
+                val statsRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER
+                    setPadding(0, 0, 0, dp(8))
+                }
+                statsRow.addView(compactStat("Blocked\nToday",
+                    entries.count { it.timeMs >= startOfToday() }.toString()))
+                statsRow.addView(compactStat("Total\nBlocked",
+                    entries.size.toString()))
+                listHost.addView(statsRow)
+            }
+            bucketListViews(b, tabName, 50, detailed = true)
+                .forEach { listHost.addView(it) }
+        }
+        b.tabs.forEachIndexed { i, name ->
+            val pill = TextView(this).apply {
+                text = name
+                textSize = 13f
+                setPadding(dp(14), dp(7), dp(14), dp(7))
+                setSingleLine()
+                isClickable = true
+                isFocusable = true
+            }
+            pill.setOnClickListener {
+                selTab = i
+                pills.forEachIndexed { j, p -> stylePill(p, j == i, b.accent) }
+                renderList()
+            }
+            pills += pill
+            tabRow.addView(pill.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT)
+                    .apply { marginEnd = dp(8) }
+            })
+        }
+        pills.forEachIndexed { j, p -> stylePill(p, j == selTab, b.accent) }
+        tabScroll.addView(tabRow)
+        card.addView(tabScroll)
+
+        // scrollable full list (its own scroller; the dialog is fixed)
+        val listScroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            addView(listHost)
+        }
+        card.addView(listScroll)
+        renderList()
+
+        card.addView(Button(this).apply {
+            text = "CLOSE"
+            textSize = 14f
+            setTextColor(TEXT)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(110, Color.red(b.accent),
+                    Color.green(b.accent), Color.blue(b.accent)))
+                setStroke(dp(1), b.accent)
+                cornerRadius = dp(10).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(10) }
+            setOnClickListener { dialog.dismiss() }
+        })
+
+        root.addView(card)
+        dialog.setContentView(root)
+        dialog.window?.setLayout(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.MATCH_PARENT)
+        dialog.window?.setBackgroundDrawable(
+            ColorDrawable(Color.rgb(0x05, 0x05, 0x10)))
+        dialog.show()
+    }
 
     // ================= shared style helpers =================
 
@@ -1647,7 +1911,14 @@ class NetworkHubActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshStatus()
-        refreshAttentionStatus()
+        refreshAllStageBuckets()
+        refreshHandler.removeCallbacks(refreshRunnable)
+        refreshHandler.postDelayed(refreshRunnable, 5000)
+    }
+
+    override fun onPause() {
+        refreshHandler.removeCallbacks(refreshRunnable)
+        super.onPause()
     }
 
     override fun onDestroy() {
