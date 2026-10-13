@@ -16,6 +16,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -53,24 +54,26 @@ import kotlin.math.min
 import kotlin.random.Random
 
 /**
- * QuietOS Network Hub — MOTOROLA flavor.
+ * QuietOS Network Hub — MOTOROLA flavor, build #4.
+ *
+ * FAITHFUL recreation of Jon's concept graphic (1230x1278, square).
+ * Zero rearrangement: the top of the page is a "GraphicStage" — a
+ * fixed-proportion section (width = screen width, height = width *
+ * 1278/1230) where every element sits at its measured proportional
+ * position from the graphic via PercentFrameLayout. Header, flanking
+ * NOW/SOON panels, Gemma medallion, five glowing orbit nodes, luminous
+ * connection lines, DIGEST/QUIET/SPAM SHIELD panels, footer — exactly
+ * the graphic's composition.
+ *
+ * Below the stage: the required phone controls absent from the graphic
+ * (NETWORK panel, SYSTEM panel) in the same neon style. Node taps pulse
+ * their adjacent panel — everything is already visible, nothing hides.
  *
  * Flavor override of NetworkHubActivity (same package + class name; the
  * class lives ONLY in flavor source sets, never in main — AGP treats a
- * main+flavor duplicate as a redeclaration error).
- *
- * Visual fidelity pass 2026-10-12 (Jon's field verdict on CI195: "dull",
- * missing the graphic's glowing connection lines, workspaces must sit
- * BESIDE their nodes): procedural cosmic background (nebula blobs +
- * starfield), Gemma medallion with violet halo, luminous bucket-colored
- * connection lines fanning from the medallion to each node, nodes as dark
- * spheres with THICK neon halos, and five bucket ROWS — node + its glassy
- * glowing workspace panel side by side, exactly the adjacency the concept
- * graphic shows. Portrait adaptation authorized by Jon.
+ * main+flavor duplicate as a redeclaration error). Phone B untouched.
  *
  * The hub IS the app on Motorola (MainActivity auto-forwards here).
- * Everything lives on one scrolling page. All NETWORK/SYSTEM controls
- * and data wiring preserved.
  *
  * Data honesty: lists are wired to real sources (attention log, token
  * claims, message spam log). No live source → honest empty state.
@@ -88,6 +91,8 @@ class NetworkHubActivity : AppCompatActivity() {
     private val RED = Color.rgb(0xFF, 0x33, 0x44)    // SPAM SHIELD
     private val VIOLET = Color.rgb(0x8A, 0x4D, 0xFF)  // Gemma / network
     private val SCRIPT_LAV = Color.rgb(0xC9, 0xA0, 0xFF)
+    private val HDR_BLUE = Color.rgb(0x4D, 0xA6, 0xFF)
+    private val HDR_LAV = Color.rgb(0xB3, 0x66, 0xFF)
 
     private data class BucketUi(
         val key: String,
@@ -121,8 +126,8 @@ class NetworkHubActivity : AppCompatActivity() {
 
     private data class ItemRow(val title: String, val sub: String)
 
-    /** Max item rows rendered per workspace panel. */
-    private val MAX_ROWS = 5
+    /** Max item rows rendered per stage workspace panel. */
+    private val STAGE_ROWS = 2
 
     private lateinit var manager: NetworkManager
     private var statusStrip: TextView? = null
@@ -130,16 +135,13 @@ class NetworkHubActivity : AppCompatActivity() {
     private var relayModeButton: Button? = null
     private val logBuffer = StringBuilder()
 
-    // single-page dashboard refs
+    // GraphicStage refs
     private var pageScroll: ScrollView? = null
-    private var contentRoot: FrameLayout? = null
-    private var colView: LinearLayout? = null
-    private var linesView: LinesView? = null
-    private var gemmaMedallion: View? = null
-    private val rowViews = mutableMapOf<String, View>()
-    private val nodeViews = mutableMapOf<String, View>()
-    private val bucketHosts = mutableMapOf<String, LinearLayout>()
-    private val bucketTabs = mutableMapOf<String, Int>()
+    private var networkPanelView: View? = null
+    private val stagePanels = mutableMapOf<String, NeonPanelView>()
+    private val stageNodes = mutableMapOf<String, View>()
+    private val stageHosts = mutableMapOf<String, LinearLayout>()
+    private val stageTabs = mutableMapOf<String, Int>()
 
     // inline NETWORK panel refs
     private var netStatusText: TextView? = null
@@ -188,7 +190,7 @@ class NetworkHubActivity : AppCompatActivity() {
             val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             val c = Canvas(b)
             c.drawColor(Color.rgb(0x05, 0x05, 0x10))
-            // nebula blobs: (x%, y%, radius%, color, alpha)
+            // nebula blobs: (x%, y%, radius%, r, g, b, alpha)
             val blobs = listOf(
                 floatArrayOf(0.50f, 0.16f, 0.55f, 0x6A.toFloat(), 0x3D.toFloat(), 0xF0.toFloat(), 88f),
                 floatArrayOf(0.10f, 0.44f, 0.42f, 0x2A.toFloat(), 0x1A.toFloat(), 0x8A.toFloat(), 80f),
@@ -307,7 +309,10 @@ class NetworkHubActivity : AppCompatActivity() {
     private data class Line(val x1: Float, val y1: Float,
                             val x2: Float, val y2: Float, val color: Int)
 
-    /** Luminous connection lines fanning from Gemma's medallion to each node. */
+    /**
+     * Luminous connection lines. Endpoints are declared in GRAPHIC pixels
+     * (1230x1278 space) and scaled to the view in onDraw.
+     */
     private inner class LinesView(context: android.content.Context) : View(context) {
         private var lines: List<Line> = emptyList()
         private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -329,14 +334,19 @@ class NetworkHubActivity : AppCompatActivity() {
         }
 
         override fun onDraw(canvas: Canvas) {
+            val s = if (width > 0) width / 1230f else 1f
             for (ln in lines) {
+                val x1 = ln.x1 * s
+                val y1 = ln.y1 * s
+                val x2 = ln.x2 * s
+                val y2 = ln.y2 * s
                 path.reset()
-                path.moveTo(ln.x1, ln.y1)
-                val mx = (ln.x1 + ln.x2) / 2f
-                val my = (ln.y1 + ln.y2) / 2f
+                path.moveTo(x1, y1)
+                val mx = (x1 + x2) / 2f
+                val my = (y1 + y2) / 2f
                 // gentle outward bow
-                val bow = if (ln.x2 >= ln.x1) -dpf(18f) else dpf(18f)
-                path.quadTo(mx + bow, my, ln.x2, ln.y2)
+                val bow = if (x2 >= x1) -dpf(18f) else dpf(18f)
+                path.quadTo(mx + bow, my, x2, y2)
                 glowPaint.strokeWidth = dpf(5f)
                 glowPaint.color = ln.color
                 glowPaint.alpha = 210
@@ -370,6 +380,48 @@ class NetworkHubActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Percentage-positioned container. Children declare rects in a fixed
+     * graphic-pixel space (gw x gh); the container scales them uniformly to
+     * its measured width. Height is derived: h = w * gh / gw.
+     */
+    private inner class PercentFrameLayout(context: android.content.Context,
+                                           val gw: Int, val gh: Int) : FrameLayout(context) {
+        inner class PParams(val gx: Int, val gy: Int,
+                            val pw: Int, val ph: Int) : FrameLayout.LayoutParams(
+            WRAP_CONTENT, WRAP_CONTENT)
+
+        override fun generateDefaultLayoutParams(): FrameLayout.LayoutParams =
+            PParams(0, 0, 10, 10)
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val w = MeasureSpec.getSize(widthMeasureSpec)
+            val scale = if (gw > 0 && w > 0) w / gw.toFloat() else 1f
+            val h = (w * gh / gw.toFloat()).toInt()
+            setMeasuredDimension(w, h)
+            for (i in 0 until childCount) {
+                val c = getChildAt(i)
+                val lp = c.layoutParams as PParams
+                c.measure(
+                    MeasureSpec.makeMeasureSpec((lp.pw * scale).toInt(),
+                        MeasureSpec.EXACTLY),
+                    MeasureSpec.makeMeasureSpec((lp.ph * scale).toInt(),
+                        MeasureSpec.EXACTLY))
+            }
+        }
+
+        override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
+            val scale = if (gw > 0 && width > 0) width / gw.toFloat() else 1f
+            for (i in 0 until childCount) {
+                val c = getChildAt(i)
+                val lp = c.layoutParams as PParams
+                val x = (lp.gx * scale).toInt()
+                val y = (lp.gy * scale).toInt()
+                c.layout(x, y, x + c.measuredWidth, y + c.measuredHeight)
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "QuietOS Network"
@@ -380,7 +432,7 @@ class NetworkHubActivity : AppCompatActivity() {
         lifecycleScope.launch { autoLoadExistingModel() }
     }
 
-    // ================= single-page dashboard =================
+    // ================= page: GraphicStage + phone controls =================
 
     private fun buildUi(): View {
         val root = FrameLayout(this)
@@ -400,485 +452,422 @@ class NetworkHubActivity : AppCompatActivity() {
         val scroll = ScrollView(this).apply { isFillViewport = true }
         pageScroll = scroll
 
-        val content = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT)
-        }
-        contentRoot = content
-
-        val lv = LinesView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, 1)
-        }
-        linesView = lv
-        content.addView(lv)
-
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT)
-            setPadding(dp(14), dp(6), dp(14), dp(14))
         }
-        colView = col
 
-        // ---- 1. header: corners + centered title ----
-        val topRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        topRow.addView(TextView(this).apply {
-            text = "DeanWay LLC"
-            textSize = 12f
-            setTextColor(Color.rgb(0x4D, 0xA6, 0xFF))
-        })
-        topRow.addView(View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-        })
-        topRow.addView(TextView(this).apply {
-            text = "Your Phone. Your Rules."
-            textSize = 12f
-            setTextColor(Color.rgb(0xB3, 0x66, 0xFF))
-        })
-        col.addView(topRow)
-        col.addView(centerLabel("QuietOS", 36f, TEXT, bold = true).apply {
-            letterSpacing = 0.08f
-            setPadding(0, dp(2), 0, 0)
-        })
-        col.addView(centerLabel("BY DEANWAY LABS", 12f, DIM).apply {
-            letterSpacing = 0.35f
-        })
-        col.addView(centerLabel("FOCUS  •  CONTROL  •  PEACE", 12f, DIM).apply {
-            letterSpacing = 0.3f
-            setPadding(0, dp(2), 0, dp(2))
-        })
+        // ---- the graphic, faithfully recreated, fixed proportion ----
+        val stage = buildStage()
+        stage.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT)
+        col.addView(stage)
 
-        // ---- 2. Gemma anchor ----
-        col.addView(buildGemma())
-
-        // ---- network status strip (tap → scroll to NETWORK) ----
+        // ---- slim status strip (not in the graphic; keeps pairing state visible) ----
         statusStrip = TextView(this).apply {
-            textSize = 13f
+            textSize = 12f
             setTextColor(DIM)
             gravity = Gravity.CENTER
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setPadding(dp(12), dp(7), dp(12), dp(7))
             background = GradientDrawable().apply {
                 setColor(Color.argb(150, 15, 17, 38))
                 setStroke(dp(1), VIOLET)
-                cornerRadius = dp(14).toFloat()
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply {
-                    topMargin = dp(10)
-                    bottomMargin = dp(4)
-                }
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { scrollToRow("network") }
-        }
-        col.addView(statusStrip)
-
-        // ---- 3. five bucket rows: node + its workspace panel, side by side ----
-        for (b in buckets) {
-            col.addView(buildBucketRow(b))
-        }
-
-        // ---- 4. NETWORK panel (classic hub controls) ----
-        val netPanel = buildNetworkPanel()
-        rowViews["network"] = netPanel
-        col.addView(netPanel)
-
-        // ---- 5. SYSTEM panel (folded-in MainActivity functions) ----
-        val sysPanel = buildSystemPanel()
-        rowViews["system"] = sysPanel
-        col.addView(sysPanel)
-
-        // ---- 6. footer ----
-        col.addView(centerLabel("DEANWAY LABS", 13f, TEXT, bold = true).apply {
-            letterSpacing = 0.35f
-            setPadding(0, dp(16), 0, 0)
-        })
-        col.addView(centerLabel("BUILDING A QUIETER TOMORROW", 10f, DIM).apply {
-            letterSpacing = 0.25f
-        })
-        col.addView(centerLabel("LESS NOISE  •  MORE LIFE  •  YOU’RE IN CONTROL",
-            10f, DIM).apply {
-            letterSpacing = 0.15f
-            setPadding(0, dp(6), 0, 0)
-        })
-        col.addView(centerLabel("QuietOS Alpha 0.1", 10f, DIM).apply {
-            setPadding(0, dp(2), 0, 0)
-        })
-
-        content.addView(col)
-        scroll.addView(content)
-        root.addView(scroll)
-
-        // draw the connection lines once everything is laid out
-        content.post { requestLinesRedraw() }
-        return root
-    }
-
-    /** Gemma medallion: violet halo, portrait, script name, waveform, quote. */
-    private fun buildGemma(): View {
-        val stack = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-            setPadding(0, dp(6), 0, dp(2))
-        }
-        val medallion = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(208), dp(208))
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { showGemma() }
-        }
-        gemmaMedallion = medallion
-        medallion.addView(GlowCircleView(this, VIOLET, 22f).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT)
-        })
-        medallion.addView(ImageView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(dp(178), dp(178), Gravity.CENTER)
-            setImageResource(R.drawable.gemma_portrait)
-            contentDescription = "Gemma"
-        })
-        stack.addView(medallion)
-        stack.addView(TextView(this).apply {
-            text = "Gemma"
-            textSize = 32f
-            setTextColor(SCRIPT_LAV)
-            typeface = gemmaScript
-            gravity = Gravity.CENTER
-            setPadding(0, dp(2), 0, 0)
-        })
-        stack.addView(centerLabel("YOUR AI ASSISTANT", 11f, DIM).apply {
-            letterSpacing = 0.3f
-        })
-        stack.addView(WaveformView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(130), dp(26)).apply {
-                topMargin = dp(4)
-                gravity = Gravity.CENTER_HORIZONTAL
-            }
-        })
-        stack.addView(centerLabel("“I’ve got you.”", 13f, TEXT).apply {
-            setPadding(0, dp(2), 0, 0)
-        })
-        return stack
-    }
-
-    /**
-     * One bucket ROW: the neon node sphere on the left, its workspace
-     * panel filling the rest of the row — the adjacency from the graphic.
-     */
-    private fun buildBucketRow(b: BucketUi): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.TOP
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(12) }
-        }
-        rowViews[b.key] = row
-
-        // node sphere
-        val nodeSize = dp(118)
-        val node = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(nodeSize, nodeSize).apply {
-                marginEnd = dp(10)
-            }
-            isClickable = true
-            isFocusable = true
-        }
-        node.addView(GlowCircleView(this, b.accent, 15f).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT)
-        })
-        val stack = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT)
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-        }
-        stack.addView(TextView(this).apply {
-            text = bucketIcons[b.key] ?: "◉"
-            textSize = 26f
-            setTextColor(b.accent)
-            gravity = Gravity.CENTER
-        })
-        stack.addView(TextView(this).apply {
-            text = b.title
-            textSize = 12.5f
-            setTextColor(TEXT)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(0, dp(3), 0, 0)
-        })
-        stack.addView(TextView(this).apply {
-            text = b.tagline
-            textSize = 7f
-            setTextColor(b.accent)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(2), 0, 0)
-        })
-        node.addView(stack)
-        nodeViews[b.key] = node
-        node.setOnClickListener { scrollToRow(b.key) }
-        row.addView(node)
-
-        // workspace panel beside the node
-        val panel = buildBucketPanel(b)
-        panel.layoutParams = LinearLayout.LayoutParams(0,
-            LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        row.addView(panel)
-        return row
-    }
-
-    private fun scrollToRow(key: String) {
-        val row = rowViews[key] ?: return
-        val scroll = pageScroll ?: return
-        val root = contentRoot ?: return
-        val y = yIn(root, row) - (scroll.height - row.height) / 2
-        scroll.smoothScrollTo(0, y.toInt().coerceAtLeast(0))
-    }
-
-    // ---------- connection-line geometry ----------
-
-    private fun xIn(root: View, v: View): Float {
-        var x = 0f
-        var c: View? = v
-        while (c != null && c !== root) {
-            x += c.left
-            c = c.parent as? View
-        }
-        return x
-    }
-
-    private fun yIn(root: View, v: View): Float {
-        var y = 0f
-        var c: View? = v
-        while (c != null && c !== root) {
-            y += c.top
-            c = c.parent as? View
-        }
-        return y
-    }
-
-    /** Recompute luminous lines from Gemma's medallion to each node. */
-    private fun requestLinesRedraw() {
-        val root = contentRoot ?: return
-        val col = colView ?: return
-        val lv = linesView ?: return
-        val med = gemmaMedallion ?: return
-        root.post {
-            val lines = mutableListOf<Line>()
-            val mx = xIn(root, med) + med.width / 2f
-            val my = yIn(root, med) + med.height - dpf(10f)
-            for (b in buckets) {
-                val node = nodeViews[b.key] ?: continue
-                if (node.width == 0) continue
-                val nx = xIn(root, node) + node.width / 2f
-                val ny = yIn(root, node) + node.height / 2f
-                lines.add(Line(mx, my, nx, ny, b.accent))
-            }
-            val lp = lv.layoutParams
-            if (lp.height != col.height && col.height > 0) {
-                lp.height = col.height
-                lv.layoutParams = lp
-            }
-            lv.setLines(lines)
-        }
-    }
-
-    // ================= workspace panels (glassy, glowing, beside their node) =================
-
-    /**
-     * Workspace card rendered beside its node — permanently open, like the
-     * concept graphic. Tabs re-render the list in place; the list is capped
-     * at MAX_ROWS so the page stays manageable. The PAGE scrolls, not the panel.
-     */
-    private fun buildBucketPanel(b: BucketUi): View {
-        val card = NeonPanelView(this, b.accent).apply {
-            setPadding(dp(22), dp(20), dp(22), dp(22))
-        }
-
-        card.addView(TextView(this).apply {
-            text = "${b.title} Workspace"
-            textSize = 17f
-            setTextColor(TEXT)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(2))
-        })
-        card.addView(centerLabel(b.tagline, 9f, b.accent).apply {
-            letterSpacing = 0.2f
-            setPadding(0, 0, 0, dp(4))
-        })
-
-        // tabs
-        val tabScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            setPadding(0, dp(4), 0, dp(8))
-        }
-        val tabRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        val pills = mutableListOf<TextView>()
-        b.tabs.forEachIndexed { i, name ->
-            val pill = TextView(this).apply {
-                text = name
-                textSize = 12.5f
-                setPadding(dp(13), dp(7), dp(13), dp(7))
-                isClickable = true
-                isFocusable = true
-            }
-            pill.setOnClickListener {
-                bucketTabs[b.key] = i
-                pills.forEachIndexed { j, p -> stylePill(p, j == i, b.accent) }
-                refreshInlineBucket(b)
-            }
-            pills += pill
-            tabRow.addView(pill.apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT)
-                    .apply { marginEnd = dp(8) }
-            })
-        }
-        pills.forEachIndexed { j, p -> stylePill(p, j == 0, b.accent) }
-        tabScroll.addView(tabRow)
-        card.addView(tabScroll)
-
-        // list area — capped; the PAGE scrolls, not the panel
-        val listHost = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        bucketHosts[b.key] = listHost
-        bucketTabs[b.key] = 0
-        card.addView(listHost)
-        refreshInlineBucket(b)
-
-        // bottom action
-        val action = Button(this).apply {
-            text = b.actionLabel
-            textSize = 14f
-            setTextColor(TEXT)
-            background = GradientDrawable().apply {
-                setColor(Color.argb(110,
-                    Color.red(b.accent), Color.green(b.accent), Color.blue(b.accent)))
-                setStroke(dp(1), b.accent)
                 cornerRadius = dp(12).toFloat()
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(10) }
+                .apply {
+                    leftMargin = dp(14)
+                    rightMargin = dp(14)
+                    topMargin = dp(8)
+                    bottomMargin = dp(2)
+                }
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { scrollToNetwork() }
+        }
+        col.addView(statusStrip)
+
+        // ---- NETWORK panel (phone controls absent from the graphic) ----
+        networkPanelView = buildNetworkPanel()
+        (networkPanelView as View).layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT)
+            .apply {
+                leftMargin = dp(14)
+                rightMargin = dp(14)
+                topMargin = dp(8)
+            }
+        col.addView(networkPanelView)
+
+        // ---- SYSTEM panel ----
+        val sysPanel = buildSystemPanel()
+        sysPanel.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT)
+            .apply {
+                leftMargin = dp(14)
+                rightMargin = dp(14)
+                topMargin = dp(10)
+                bottomMargin = dp(18)
+            }
+        col.addView(sysPanel)
+
+        scroll.addView(col)
+        root.addView(scroll)
+        return root
+    }
+
+    private fun scrollToNetwork() {
+        val target = networkPanelView ?: return
+        val scroll = pageScroll ?: return
+        scroll.post {
+            var y = 0
+            var c: View? = target
+            while (c != null && c !== scroll) {
+                y += c.top
+                c = c.parent as? View
+            }
+            scroll.smoothScrollTo(0, y)
+        }
+    }
+
+    // ================= GraphicStage: the concept graphic, exactly =================
+    // All rects below are GRAPHIC PIXELS in the 1230x1278 concept image,
+    // measured directly off Jon's artwork. PercentFrameLayout scales them
+    // uniformly to the phone's width. Nothing is rearranged.
+
+    private fun stageText(text: String, sizeSp: Float, color: Int,
+                          bold: Boolean = false, ls: Float = 0f,
+                          gravity: Int = Gravity.CENTER): TextView =
+        TextView(this).apply {
+            this.text = text
+            textSize = sizeSp
+            setTextColor(color)
+            this.gravity = gravity
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+            if (ls != 0f) letterSpacing = ls
+            setSingleLine()
+            ellipsize = TextUtils.TruncateAt.END
+        }
+
+    private fun buildStage(): View {
+        val stage = PercentFrameLayout(this, 1230, 1278)
+
+        // ---- 1. glowing connection lines (behind everything else) ----
+        val lv = LinesView(this)
+        lv.setLines(listOf(
+            Line(498f, 344f, 445f, 283f, GREEN),    // Gemma -> NOW
+            Line(757f, 370f, 872f, 283f, ORANGE),   // Gemma -> SOON
+            Line(495f, 610f, 447f, 663f, BLUE),    // Gemma -> DIGEST
+            Line(759f, 583f, 868f, 663f, PURPLE),  // Gemma -> QUIET
+            Line(590f, 648f, 578f, 795f, RED),     // Gemma -> SPAM SHIELD (left)
+            Line(640f, 648f, 652f, 795f, RED)      // Gemma -> SPAM SHIELD (right)
+        ))
+        stage.addView(lv, stage.PParams(0, 0, 1230, 1278))
+
+        // ---- 2. header ----
+        stage.addView(stageText("DeanWay LLC", 8f, HDR_BLUE),
+            stage.PParams(10, 6, 190, 30))
+        stage.addView(stageText("Your Phone. Your Rules.", 7f, HDR_LAV),
+            stage.PParams(900, 6, 320, 30))
+        stage.addView(stageText("QuietOS", 18f, TEXT, bold = true),
+            stage.PParams(485, 36, 260, 92))
+        stage.addView(stageText("BY DEANWAY LABS", 7f, DIM, ls = 0.1f),
+            stage.PParams(500, 128, 230, 28))
+        stage.addView(stageText("FOCUS • CONTROL • PEACE", 7f, DIM, ls = 0.1f),
+            stage.PParams(440, 156, 350, 30))
+
+        // ---- 3. workspace panels (glassy, glowing, compact) ----
+        val panelRects = mapOf(
+            "now" to intArrayOf(8, 52, 354, 496),
+            "soon" to intArrayOf(868, 52, 354, 496),
+            "digest" to intArrayOf(8, 558, 354, 454),
+            "quiet" to intArrayOf(868, 558, 354, 454),
+            "spam" to intArrayOf(378, 948, 474, 284)
+        )
+        for (b in buckets) {
+            val r = panelRects[b.key] ?: continue
+            val panel = buildStagePanel(b)
+            stagePanels[b.key] = panel
+            stage.addView(panel, stage.PParams(r[0], r[1], r[2], r[3]))
+        }
+
+        // ---- 4. orbit nodes (above panels, like the graphic) ----
+        val nodeRects = mapOf(
+            "now" to intArrayOf(357, 195, 176, 176),
+            "soon" to intArrayOf(784, 195, 176, 176),
+            "digest" to intArrayOf(365, 581, 164, 164),
+            "quiet" to intArrayOf(786, 581, 164, 164),
+            "spam" to intArrayOf(527, 770, 176, 176)
+        )
+        for (b in buckets) {
+            val r = nodeRects[b.key] ?: continue
+            val node = buildStageNode(b)
+            stageNodes[b.key] = node
+            stage.addView(node, stage.PParams(r[0], r[1], r[2], r[3]))
+            node.setOnClickListener { pulsePanel(b.key) }
+        }
+
+        // ---- 5. Gemma medallion, center ----
+        val gemma = buildGemmaBlock()
+        stage.addView(gemma, stage.PParams(425, 285, 380, 480))
+
+        // ---- 6. footer ----
+        stage.addView(TextView(this).apply {
+            text = "D"
+            textSize = 40f
+            setTextColor(VIOLET)
+            typeface = gemmaScript
+            gravity = Gravity.CENTER
+        }, stage.PParams(105, 1025, 130, 120))
+        stage.addView(stageText("DEANWAY LABS", 8f, TEXT, bold = true, ls = 0.15f),
+            stage.PParams(70, 1148, 250, 28))
+        stage.addView(stageText("BUILDING A QUIETER TOMORROW", 6f, DIM, ls = 0.1f),
+            stage.PParams(35, 1178, 320, 24))
+        stage.addView(stageText("DeanWay LLC | Evansville, IN", 6f, DIM),
+            stage.PParams(10, 1242, 320, 24))
+        stage.addView(TextView(this).apply {
+            text = "LESS NOISE\nMORE LIFE\nYOU'RE IN CONTROL"
+            textSize = 7f
+            setTextColor(DIM)
+            gravity = Gravity.CENTER
+            setLineSpacing(0f, 1.15f)
+        }, stage.PParams(945, 1080, 270, 95))
+        stage.addView(stageText("QuietOS Alpha 0.1", 6f, DIM),
+            stage.PParams(1000, 1242, 215, 22))
+
+        return stage
+    }
+
+    /** Gemma medallion block: violet halo, portrait, script name, waveform, quote. */
+    private fun buildGemmaBlock(): View {
+        // nested percentage frame: 380x480 graphic px
+        val block = PercentFrameLayout(this, 380, 480)
+        block.addView(GlowCircleView(this, VIOLET, 12f),
+            block.PParams(12, 12, 356, 356))
+        val portrait = ImageView(this).apply {
+            setImageResource(R.drawable.gemma_portrait)
+            contentDescription = "Gemma"
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { showGemma() }
+        }
+        block.addView(portrait, block.PParams(27, 27, 326, 326))
+        block.addView(TextView(this).apply {
+            text = "Gemma"
+            textSize = 18f
+            setTextColor(SCRIPT_LAV)
+            typeface = gemmaScript
+            gravity = Gravity.CENTER
+        }, block.PParams(80, 300, 220, 70))
+        block.addView(TextView(this).apply {
+            text = "YOUR AI ASSISTANT"
+            textSize = 7f
+            setTextColor(DIM)
+            gravity = Gravity.CENTER
+            letterSpacing = 0.15f
+            setSingleLine()
+        }, block.PParams(40, 378, 300, 26))
+        block.addView(WaveformView(this),
+            block.PParams(125, 408, 130, 24))
+        block.addView(TextView(this).apply {
+            text = "“I’ve got you.”"
+            textSize = 7f
+            setTextColor(TEXT)
+            gravity = Gravity.CENTER
+            setSingleLine()
+        }, block.PParams(90, 436, 200, 30))
+        return block
+    }
+
+    /** One orbit node: dark sphere, thick neon halo, icon + name + tagline. */
+    private fun buildStageNode(b: BucketUi): View {
+        val node = FrameLayout(this).apply {
+            isClickable = true
+            isFocusable = true
+        }
+        node.addView(GlowCircleView(this, b.accent, 6f).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT)
+        })
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT)
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+        }
+        stack.addView(TextView(this).apply {
+            text = bucketIcons[b.key] ?: "◉"
+            textSize = 16f
+            setTextColor(b.accent)
+            gravity = Gravity.CENTER
+        })
+        stack.addView(TextView(this).apply {
+            text = b.title
+            textSize = 9f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, dp(2), 0, 0)
+        })
+        stack.addView(TextView(this).apply {
+            text = b.tagline
+            textSize = 6f
+            setTextColor(b.accent)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(1), 0, 0)
+        })
+        node.addView(stack)
+        return node
+    }
+
+    /** Node tap: pulse its adjacent panel (everything is already visible). */
+    private fun pulsePanel(key: String) {
+        val panel = stagePanels[key] ?: return
+        panel.post {
+            panel.pivotX = panel.width / 2f
+            panel.pivotY = panel.height / 2f
+            panel.animate().scaleX(1.05f).scaleY(1.05f).setDuration(130)
+                .withEndAction {
+                    panel.animate().scaleX(1f).scaleY(1f).setDuration(130).start()
+                }.start()
+        }
+    }
+
+    // ================= stage workspace panels (compact, faithful) =================
+
+    /**
+     * Compact workspace card at the graphic's measured position. Keeps the
+     * graphic's look (glassy, glowing bucket-color border, title bar, tab
+     * pills) with compact content: title, 3 tab pills, up to 2 data rows,
+     * 1 action button. SPAM SHIELD shows live stats + button (its rect is
+     * too short for rows at legible sizes).
+     */
+    private fun buildStagePanel(b: BucketUi): NeonPanelView {
+        val card = NeonPanelView(this, b.accent)
+        card.setPadding(dp(7), dp(6), dp(7), dp(7))
+
+        // title bar: ‹ TITLE Workspace        icon
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(TextView(this).apply {
+            text = "‹"
+            textSize = 13f
+            setTextColor(b.accent)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, dp(3), 0)
+        })
+        titleRow.addView(TextView(this).apply {
+            text = "${b.title} Workspace"
+            textSize = 11f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            setSingleLine()
+            ellipsize = TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        titleRow.addView(TextView(this).apply {
+            text = bucketIcons[b.key] ?: "◉"
+            textSize = 12f
+            setTextColor(b.accent)
+            gravity = Gravity.CENTER
+        })
+        card.addView(titleRow)
+
+        if (b.key == "spam") {
+            // stats + action (rect too short for rows at legible sizes)
+            val stats = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+                setPadding(0, dp(4), 0, dp(2))
+            }
+            val entries = spamEntries()
+            val today = startOfToday()
+            val blockedToday = entries.count { it.timeMs >= today }
+            stats.addView(compactStat("Blocked\nToday", blockedToday.toString()))
+            stats.addView(compactStat("Total\nBlocked", entries.size.toString()))
+            card.addView(stats)
+        } else {
+            // tabs (first 3, like the graphic's pill row)
+            val tabs = b.tabs.take(3)
+            val tabScroll = HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                setPadding(0, dp(5), 0, dp(5))
+            }
+            val tabRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            val pills = mutableListOf<TextView>()
+            tabs.forEachIndexed { i, name ->
+                val pill = TextView(this).apply {
+                    text = name
+                    textSize = 10f
+                    setPadding(dp(9), dp(4), dp(9), dp(4))
+                    setSingleLine()
+                    isClickable = true
+                    isFocusable = true
+                }
+                pill.setOnClickListener {
+                    stageTabs[b.key] = i
+                    pills.forEachIndexed { j, p -> stylePill(p, j == i, b.accent) }
+                    refreshStageBucket(b)
+                }
+                pills += pill
+                tabRow.addView(pill.apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT)
+                        .apply { marginEnd = dp(6) }
+                })
+            }
+            pills.forEachIndexed { j, p -> stylePill(p, j == 0, b.accent) }
+            tabScroll.addView(tabRow)
+            card.addView(tabScroll)
+
+            // list area — capped at STAGE_ROWS; the PAGE scrolls, not the panel
+            val host = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            stageHosts[b.key] = host
+            stageTabs[b.key] = 0
+            card.addView(host)
+            refreshStageBucket(b)
+        }
+
+        // bottom action
+        val action = Button(this).apply {
+            text = b.actionLabel
+            textSize = 11f
+            setTextColor(TEXT)
+            isAllCaps = false
+            background = GradientDrawable().apply {
+                setColor(Color.argb(110,
+                    Color.red(b.accent), Color.green(b.accent), Color.blue(b.accent)))
+                setStroke(dp(1), b.accent)
+                cornerRadius = dp(10).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(6) }
             setOnClickListener { onBucketAction(b) }
         }
         card.addView(action)
         return card
     }
 
-    private fun refreshInlineBucket(b: BucketUi) {
-        val host = bucketHosts[b.key] ?: return
-        val tab = bucketTabs[b.key] ?: 0
-        host.removeAllViews()
-        val tabName = b.tabs.getOrElse(tab) { "" }
-        when (b.key) {
-            "now" -> {
-                val keys = when (tabName) {
-                    "Calls" -> listOf("call", "phone", "missed")
-                    "Messages" -> listOf("message", "sms", "text", "mms")
-                    "Alerts" -> listOf("alert", "alarm")
-                    else -> emptyList() // Apps: show all
-                }
-                val items = filterItems(nowItems(), keys).take(MAX_ROWS)
-                if (items.isEmpty()) host.addView(emptyState())
-                else items.forEach { host.addView(itemRow(it.title, it.sub, b.accent)) }
-            }
-            "soon" -> host.addView(emptyState("Nothing scheduled yet."))
-            "digest" -> {
-                val keys = when (tabName) {
-                    "Calls" -> listOf("call", "phone")
-                    "Messages" -> listOf("message", "sms", "text")
-                    "Apps" -> listOf("app")
-                    "Social" -> listOf("social")
-                    else -> emptyList()
-                }
-                val items = filterItems(digestItems(), keys).take(MAX_ROWS)
-                if (items.isEmpty()) host.addView(emptyState())
-                else items.forEach { host.addView(itemRow(it.title, it.sub, b.accent)) }
-            }
-            "quiet" -> when (tabName) {
-                "Blocked" -> {
-                    val items = spamEntries().map { ItemRow(it.title, it.sub) }
-                        .take(MAX_ROWS)
-                    if (items.isEmpty()) host.addView(emptyState("Nothing blocked yet."))
-                    else items.forEach { host.addView(itemRow(it.title, it.sub, b.accent)) }
-                }
-                "Filtered" -> {
-                    val items = quietItems().take(MAX_ROWS)
-                    if (items.isEmpty()) host.addView(emptyState())
-                    else items.forEach { host.addView(itemRow(it.title, it.sub, b.accent)) }
-                }
-                else -> host.addView(infoBlock(listOf(
-                    "QUIET keeps it silent.",
-                    "Silenced notifications land here instead of buzzing Jon.",
-                    "Nothing to configure — the attention engine decides."
-                )))
-            }
-            "spam" -> when (tabName) {
-                "Settings" -> host.addView(infoBlock(listOf(
-                    "SPAM SHIELD is ON.",
-                    "",
-                    "CLEAN → relayed now",
-                    "SUSPECT → relayed flagged, Jon decides",
-                    "SPAM → held on the home phone",
-                    "",
-                    "VIPs (Noah Dean, Vanessa Brzeski, doctors) always come through."
-                )))
-                else -> {
-                    val entries = spamEntries()
-                    val items = (if (tabName == "Calls")
-                        entries.filter {
-                            it.title.contains("call", true) || it.sub.contains("call", true)
-                        } else entries).take(MAX_ROWS)
-                    // stats header, like the graphic
-                    val stats = LinearLayout(this).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER
-                        setPadding(0, 0, 0, dp(10))
-                    }
-                    val today = startOfToday()
-                    val blockedToday = entries.count { it.timeMs >= today }
-                    stats.addView(statCell("Blocked\nToday", blockedToday.toString(), b.accent))
-                    stats.addView(statCell("Total\nBlocked", entries.size.toString(), b.accent))
-                    host.addView(stats)
-                    if (items.isEmpty()) host.addView(emptyState("Nothing blocked yet."))
-                    else items.forEach {
-                        host.addView(itemRow(it.title,
-                            listOf(it.sub, fmtTime(it.timeMs))
-                                .filter { s -> s.isNotBlank() }.joinToString("  •  "),
-                            b.accent))
-                    }
-                }
-            }
-        }
-        // panel heights changed → re-aim the connection lines
-        requestLinesRedraw()
-    }
-
-    private fun statCell(label: String, value: String, accent: Int): LinearLayout =
+    private fun compactStat(label: String, value: String): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -886,61 +875,109 @@ class NetworkHubActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             addView(TextView(this@NetworkHubActivity).apply {
                 text = label
-                textSize = 11f
+                textSize = 8f
                 setTextColor(DIM)
                 gravity = Gravity.CENTER
             })
             addView(TextView(this@NetworkHubActivity).apply {
                 text = value
-                textSize = 26f
+                textSize = 15f
                 setTextColor(TEXT)
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
             })
         }
 
-    private fun onBucketAction(b: BucketUi) {
+    /** Compact data row: real title, single line, chevron. */
+    private fun stageRow(title: String, accent: Int): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(4), dp(4), dp(4))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(120, 20, 28, 50))
+                cornerRadius = dp(8).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { bottomMargin = dp(4) }
+        }
+        row.addView(TextView(this).apply {
+            text = title
+            textSize = 11f
+            setTextColor(TEXT)
+            setSingleLine()
+            ellipsize = TextUtils.TruncateAt.END
+            layoutParams = LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        row.addView(TextView(this).apply {
+            text = "›"
+            textSize = 16f
+            setTextColor(accent)
+            setPadding(dp(2), 0, dp(2), 0)
+        })
+        return row
+    }
+
+    private fun refreshStageBucket(b: BucketUi) {
+        val host = stageHosts[b.key] ?: return
+        val tab = stageTabs[b.key] ?: 0
+        host.removeAllViews()
+        val tabs = b.tabs.take(3)
+        val tabName = tabs.getOrElse(tab) { "" }
         when (b.key) {
-            "now" -> AlertDialog.Builder(this)
-                .setTitle("Clear completed")
-                .setMessage("Clear the attention log? This removes the " +
-                    "listed NOW items from this device.")
-                .setPositiveButton("Clear") { _, _ ->
-                    try { AttentionRepository(this).clear() } catch (e: Exception) { }
-                    refreshInlineBucket(b)
-                    toast("Attention log cleared.")
+            "now" -> {
+                val keys = when (tabName) {
+                    "Calls" -> listOf("call", "phone", "missed")
+                    "Messages" -> listOf("message", "sms", "text", "mms")
+                    else -> emptyList() // Alerts: show all
                 }
-                .setNegativeButton("Cancel", null)
-                .show()
-            "soon" -> toast("The Soon list isn’t wired yet — nothing to add.")
-            "digest" -> AlertDialog.Builder(this)
-                .setTitle("Mark as read")
-                .setMessage("Mark all digest items read? This clears the " +
-                    "attention log on this device.")
-                .setPositiveButton("Mark read") { _, _ ->
-                    try { AttentionRepository(this).clear() } catch (e: Exception) { }
-                    refreshInlineBucket(b)
-                    toast("Digest marked read.")
+                val items = filterItems(nowItems(), keys).take(STAGE_ROWS)
+                if (items.isEmpty()) host.addView(compactEmpty())
+                else items.forEach { host.addView(stageRow(it.title, b.accent)) }
+            }
+            "soon" -> host.addView(compactEmpty("Nothing scheduled yet."))
+            "digest" -> {
+                val keys = when (tabName) {
+                    "Calls" -> listOf("call", "phone")
+                    "Messages" -> listOf("message", "sms", "text")
+                    else -> emptyList() // All: show all
                 }
-                .setNegativeButton("Cancel", null)
-                .show()
-            "quiet" -> scrollToRow("spam")
-            "spam" -> AlertDialog.Builder(this)
-                .setTitle("Spam Protection")
-                .setMessage("SPAM SHIELD is ON.\n\nCLEAN → relay now\n" +
-                    "SUSPECT → relay flagged, Jon decides\n" +
-                    "SPAM → held on the home phone\n\n" +
-                    "VIPs (Noah Dean, Vanessa Brzeski, doctors) always come through.")
-                .setPositiveButton("OK", null)
-                .show()
+                val items = filterItems(digestItems(), keys).take(STAGE_ROWS)
+                if (items.isEmpty()) host.addView(compactEmpty())
+                else items.forEach { host.addView(stageRow(it.title, b.accent)) }
+            }
+            "quiet" -> when (tabName) {
+                "Blocked" -> {
+                    val items = spamEntries().take(STAGE_ROWS)
+                    if (items.isEmpty()) host.addView(compactEmpty("Nothing blocked yet."))
+                    else items.forEach { host.addView(stageRow(it.title, b.accent)) }
+                }
+                "Filtered" -> {
+                    val items = quietItems().take(STAGE_ROWS)
+                    if (items.isEmpty()) host.addView(compactEmpty())
+                    else items.forEach { host.addView(stageRow(it.title, b.accent)) }
+                }
+                else -> host.addView(compactEmpty("QUIET keeps it silent."))
+            }
         }
     }
 
-    private fun toast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-    }
+    private fun compactEmpty(text: String = "Nothing here yet."): View =
+        TextView(this).apply {
+            this.text = text
+            textSize = 11f
+            setTextColor(DIM)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(10), dp(8), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
 
-    // ================= style helpers =================
+    // ================= shared style helpers =================
 
     private fun centerLabel(text: String, size: Float, color: Int,
                             bold: Boolean = false): TextView =
@@ -950,13 +987,6 @@ class NetworkHubActivity : AppCompatActivity() {
             setTextColor(color)
             gravity = Gravity.CENTER
             if (bold) typeface = Typeface.DEFAULT_BOLD
-        }
-
-    private fun roundedBg(fill: Int, stroke: Int, radiusDp: Int): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(fill)
-            setStroke(dp(1), stroke)
-            cornerRadius = radiusDp.toFloat()
         }
 
     private fun showGemma() {
@@ -982,74 +1012,6 @@ class NetworkHubActivity : AppCompatActivity() {
         }
     }
 
-    private fun itemRow(title: String, sub: String, accent: Int): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), dp(9), dp(4), dp(9))
-            background = GradientDrawable().apply {
-                setColor(Color.argb(120, 20, 28, 50))
-                cornerRadius = dp(10).toFloat()
-            }
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { bottomMargin = dp(8) }
-        }
-        val texts = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            setPadding(dp(10), 0, dp(6), 0)
-        }
-        texts.addView(TextView(this).apply {
-            text = title
-            textSize = 14f
-            setTextColor(TEXT)
-        })
-        if (sub.isNotBlank()) texts.addView(TextView(this).apply {
-            text = sub
-            textSize = 12f
-            setTextColor(DIM)
-            setPadding(0, dp(2), 0, 0)
-        })
-        row.addView(texts)
-        row.addView(TextView(this).apply {
-            text = "›"
-            textSize = 22f
-            setTextColor(accent)
-            setPadding(0, 0, dp(8), 0)
-        })
-        return row
-    }
-
-    private fun emptyState(text: String = "Nothing here yet."): View =
-        TextView(this).apply {
-            this.text = text
-            textSize = 14f
-            setTextColor(DIM)
-            gravity = Gravity.CENTER
-            setPadding(dp(16), dp(24), dp(16), dp(24))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-        }
-
-    private fun infoBlock(lines: List<String>): View =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-            setPadding(dp(6), dp(8), dp(6), dp(8))
-            for (l in lines) addView(TextView(this@NetworkHubActivity).apply {
-                text = l
-                textSize = 13.5f
-                setTextColor(TEXT)
-                setPadding(0, dp(4), 0, dp(4))
-            })
-        }
-
     private fun sectionLabel(text: String): TextView =
         TextView(this).apply {
             this.text = text
@@ -1059,13 +1021,54 @@ class NetworkHubActivity : AppCompatActivity() {
             setPadding(dp(4), dp(10), dp(4), dp(4))
         }
 
+    private fun toast(msg: String) {
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun onBucketAction(b: BucketUi) {
+        when (b.key) {
+            "now" -> AlertDialog.Builder(this)
+                .setTitle("Clear completed")
+                .setMessage("Clear the attention log? This removes the " +
+                    "listed NOW items from this device.")
+                .setPositiveButton("Clear") { _, _ ->
+                    try { AttentionRepository(this).clear() } catch (e: Exception) { }
+                    refreshStageBucket(b)
+                    toast("Attention log cleared.")
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            "soon" -> toast("The Soon list isn’t wired yet — nothing to add.")
+            "digest" -> AlertDialog.Builder(this)
+                .setTitle("Mark as read")
+                .setMessage("Mark all digest items read? This clears the " +
+                    "attention log on this device.")
+                .setPositiveButton("Mark read") { _, _ ->
+                    try { AttentionRepository(this).clear() } catch (e: Exception) { }
+                    refreshStageBucket(b)
+                    toast("Digest marked read.")
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+            "quiet" -> pulsePanel("spam")
+            "spam" -> AlertDialog.Builder(this)
+                .setTitle("Spam Protection")
+                .setMessage("SPAM SHIELD is ON.\n\nCLEAN → relay now\n" +
+                    "SUSPECT → relay flagged, Jon decides\n" +
+                    "SPAM → held on the home phone\n\n" +
+                    "VIPs (Noah Dean, Vanessa Brzeski, doctors) always come through.")
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
     // ---------- real data providers ----------
 
     private fun attentionRecords(): List<AttentionRecord> =
         try { AttentionRepository(this).readAll() } catch (e: Exception) { emptyList() }
 
     private fun fmtTime(ms: Long): String =
-        if (ms <= 0) "" else SimpleDateFormat("MMM d, h:mm a", Locale.US).format(Date(ms))
+        if (ms <= 0L) "" else SimpleDateFormat("MMM d, h:mm a", Locale.US).format(Date(ms))
 
     private fun nowItems(): List<ItemRow> {
         val items = mutableListOf<ItemRow>()
@@ -1136,15 +1139,11 @@ class NetworkHubActivity : AppCompatActivity() {
         }
     }
 
-    // ================= NETWORK panel (classic hub controls, glowing style) =================
+    // ================= NETWORK panel (phone controls, neon style) =================
 
     private fun buildNetworkPanel(): View {
         val accent = VIOLET
         val card = NeonPanelView(this, accent).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(14) }
             setPadding(dp(22), dp(20), dp(22), dp(22))
         }
         card.addView(TextView(this).apply {
@@ -1266,10 +1265,6 @@ class NetworkHubActivity : AppCompatActivity() {
     private fun buildSystemPanel(): View {
         val accent = VIOLET
         val card = NeonPanelView(this, accent).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(14) }
             setPadding(dp(22), dp(20), dp(22), dp(22))
         }
         card.addView(TextView(this).apply {
@@ -1584,7 +1579,9 @@ class NetworkHubActivity : AppCompatActivity() {
                 if (host.isEmpty()) return@setPositiveButton
                 lifecycleScope.launch {
                     try {
-                        withContext(Dispatchers.IO) { manager.connectTo(host) }
+                        withContext(Dispatchers.IO) {
+                            manager.connectTo(host)
+                        }
                         log("Connected to $host")
                     } catch (e: Exception) {
                         log("Connect failed: ${e.message}")
