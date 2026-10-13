@@ -4,6 +4,8 @@ import android.animation.ValueAnimator
 import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.Manifest
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -19,8 +21,12 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.ContactsContract
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -37,6 +43,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -50,6 +57,8 @@ import com.deanwaylabs.quietos.attention.AttentionRepository
 import com.deanwaylabs.quietos.calls.BlocklistStore
 import com.deanwaylabs.quietos.calls.CallScreeningLog
 import com.deanwaylabs.quietos.calls.ScreenedCall
+import com.deanwaylabs.quietos.voice.GemmaCommandRouter
+import com.deanwaylabs.quietos.voice.VoiceIntent
 import com.deanwaylabs.quietos.messages.MessageSpamLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -206,6 +215,23 @@ class NetworkHubActivity : AppCompatActivity() {
             lifecycleScope.launch { importAndLoad(uri) }
         }
     }
+
+    // ---------- Gemma voice-command workspace state ----------
+    private var gemmaMicListening = false
+    private var gemmaSpeech: SpeechRecognizer? = null
+    private val micPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            gemmaMicStatus?.text =
+                if (granted) "Microphone ready — tap the mic and talk."
+                else "Microphone blocked — type your command below instead."
+            if (granted) startGemmaListening()
+        }
+    // Updated by the workspace dialog while it is open; null when closed.
+    private var gemmaMicStatus: TextView? = null
+    private var gemmaMicButton: Button? = null
+    private var gemmaLogHost: LinearLayout? = null
+    private var gemmaLogScroll: ScrollView? = null
+    private var gemmaHeard: TextView? = null
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
     private fun dpf(v: Float): Float = v * resources.displayMetrics.density
@@ -1417,12 +1443,380 @@ class NetworkHubActivity : AppCompatActivity() {
             if (bold) typeface = Typeface.DEFAULT_BOLD
         }
 
+    // ================= Gemma voice-command workspace =================
+    // Jon's design (2026-10-12): tap the medallion -> her workspace opens ->
+    // tap-to-talk button + text input inside. She hears, she acts, the
+    // workspace confirms visually. Command layer, not a chatbot: no TTS.
+
     private fun showGemma() {
-        AlertDialog.Builder(this)
-            .setTitle("Gemma")
-            .setMessage("Gemma voice interface: coming with the assistant brain.")
-            .setPositiveButton("OK", null)
-            .show()
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setOnDismissListener {
+            stopGemmaListening()
+            gemmaMicStatus = null
+            gemmaMicButton = null
+            gemmaLogHost = null
+            gemmaLogScroll = null
+            gemmaHeard = null
+        }
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(0x05, 0x05, 0x10))
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+        }
+        val card = NeonPanelView(this, VIOLET).apply {
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT)
+        }
+
+        card.addView(TextView(this).apply {
+            text = "Gemma"
+            textSize = 20f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(2))
+        })
+        card.addView(centerLabel("VOICE COMMAND", 11f, VIOLET).apply {
+            letterSpacing = 0.2f
+            setPadding(0, 0, 0, dp(8))
+        })
+
+        val brainLine = when (hubModel.state) {
+            ModelState.READY -> "Brain: READY — on-device 1.7B"
+            ModelState.LOADING -> "Brain: still loading — keyword commands work now."
+            else -> "Brain: not loaded — keyword commands work; free-form needs the model."
+        }
+        card.addView(centerLabel(brainLine, 12f, DIM).apply {
+            setPadding(0, 0, 0, dp(4))
+        })
+
+        val micStatus = TextView(this).apply {
+            text = "Tap the mic and talk, or type below."
+            textSize = 12f
+            setTextColor(DIM)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(4))
+        }
+        gemmaMicStatus = micStatus
+        card.addView(micStatus)
+
+        val heard = TextView(this).apply {
+            text = ""
+            textSize = 14f
+            setTextColor(TEXT)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            minHeight = dp(30)
+        }
+        gemmaHeard = heard
+        card.addView(heard)
+
+        val micBtn = Button(this).apply {
+            text = "🎤 TAP TO TALK"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = GradientDrawable().apply {
+                setColor(Color.argb(150, Color.red(VIOLET),
+                    Color.green(VIOLET), Color.blue(VIOLET)))
+                setStroke(dp(2), VIOLET)
+                cornerRadius = dp(16).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(4); bottomMargin = dp(8) }
+            setOnClickListener { onGemmaMicTap() }
+        }
+        gemmaMicButton = micBtn
+        card.addView(micBtn)
+
+        // text input fallback
+        val inputRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val input = EditText(this).apply {
+            hint = "Type a command — “block 812 555 1234”"
+            setHintTextColor(DIM)
+            setTextColor(TEXT)
+            textSize = 14f
+            layoutParams = LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(160, 20, 28, 48))
+                setStroke(dp(1), Color.argb(90, 120, 130, 160))
+                cornerRadius = dp(10).toFloat()
+            }
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        val sendBtn = Button(this).apply {
+            text = "SEND"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = GradientDrawable().apply {
+                setColor(Color.argb(150, Color.red(VIOLET),
+                    Color.green(VIOLET), Color.blue(VIOLET)))
+                setStroke(dp(1), VIOLET)
+                cornerRadius = dp(10).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { marginStart = dp(8) }
+            setOnClickListener {
+                val t = input.text.toString().trim()
+                if (t.isNotEmpty()) {
+                    input.setText("")
+                    handleGemmaText(t)
+                }
+            }
+        }
+        inputRow.addView(input)
+        inputRow.addView(sendBtn)
+        card.addView(inputRow)
+
+        card.addView(centerLabel("COMMAND LOG", 10f, DIM).apply {
+            letterSpacing = 0.2f
+            setPadding(0, dp(10), 0, dp(4))
+        })
+        val logHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        gemmaLogHost = logHost
+        val logScroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            addView(logHost)
+        }
+        gemmaLogScroll = logScroll
+        card.addView(logScroll)
+
+        card.addView(Button(this).apply {
+            text = "CLOSE"
+            textSize = 14f
+            setTextColor(TEXT)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(110, Color.red(VIOLET),
+                    Color.green(VIOLET), Color.blue(VIOLET)))
+                setStroke(dp(1), VIOLET)
+                cornerRadius = dp(10).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(10) }
+            setOnClickListener { dialog.dismiss() }
+        })
+
+        gemmaLog("Say “block” + a number, or “call” + a name or number.")
+        root.addView(card)
+        dialog.setContentView(root)
+        dialog.window?.setLayout(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.MATCH_PARENT)
+        dialog.window?.setBackgroundDrawable(
+            ColorDrawable(Color.rgb(0x05, 0x05, 0x10)))
+        dialog.show()
+    }
+
+    private fun gemmaLog(line: String): TextView? {
+        val host = gemmaLogHost ?: return null
+        val tv = TextView(this).apply {
+            text = line
+            textSize = 13f
+            setTextColor(TEXT)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        host.addView(tv)
+        gemmaLogScroll?.post { gemmaLogScroll?.fullScroll(View.FOCUS_DOWN) }
+        return tv
+    }
+
+    // ---------- mic handling ----------
+
+    private fun onGemmaMicTap() {
+        if (gemmaMicListening) {
+            stopGemmaListening()
+            gemmaMicStatus?.text = "Stopped. Tap the mic to talk again, or type below."
+            return
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            gemmaMicStatus?.text =
+                "Speech recognition isn't on this phone — type your command below."
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED) {
+            startGemmaListening()
+        } else {
+            gemmaMicStatus?.text = "QuietOS needs the microphone to hear you."
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun startGemmaListening() {
+        if (gemmaMicListening) return
+        val sr = SpeechRecognizer.createSpeechRecognizer(this)
+        gemmaSpeech = sr
+        sr.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                setGemmaMicUi(true, "Listening… talk now.")
+            }
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {
+                if (gemmaMicListening) gemmaMicStatus?.text = "Heard you — working…"
+            }
+            override fun onError(error: Int) {
+                stopGemmaListening()
+                gemmaMicStatus?.text =
+                    "Didn't catch that — tap to try again, or type below."
+            }
+            override fun onResults(results: Bundle?) {
+                val heard = results
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull().orEmpty()
+                stopGemmaListening()
+                if (heard.isBlank()) {
+                    gemmaMicStatus?.text =
+                        "Didn't catch that — tap to try again, or type below."
+                } else {
+                    gemmaMicStatus?.text = "Tap the mic and talk, or type below."
+                    handleGemmaText(heard)
+                }
+            }
+            override fun onPartialResults(partialResults: Bundle?) {
+                val part = partialResults
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                if (!part.isNullOrBlank()) gemmaHeard?.text = "“$part…”"
+            }
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        val ri = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+        }
+        gemmaMicListening = true
+        setGemmaMicUi(true, "Starting…")
+        runCatching { sr.startListening(ri) }.onFailure {
+            stopGemmaListening()
+            gemmaMicStatus?.text = "Couldn't start listening — type your command below."
+        }
+    }
+
+    private fun stopGemmaListening() {
+        gemmaMicListening = false
+        runCatching { gemmaSpeech?.stopListening() }
+        runCatching { gemmaSpeech?.destroy() }
+        gemmaSpeech = null
+        gemmaMicButton?.text = "🎤 TAP TO TALK"
+    }
+
+    private fun setGemmaMicUi(listening: Boolean, status: String) {
+        gemmaMicListening = listening
+        gemmaMicButton?.text = if (listening) "🔴 TAP TO STOP" else "🎤 TAP TO TALK"
+        gemmaMicStatus?.text = status
+    }
+
+    // ---------- command handling ----------
+
+    private fun handleGemmaText(text: String) {
+        gemmaHeard?.text = ""
+        gemmaLog("Heard: “$text”")
+        val router = GemmaCommandRouter(llmParse = { utterance ->
+            if (hubModel.state != ModelState.READY) null
+            else hubModel.send(
+                "Parse this voice command into exactly one line like: " +
+                    "INTENT: block | TARGET: 8125551234\n" +
+                    "Valid intents: block, unblock, call, unknown. " +
+                    "TARGET is phone number digits or a contact name, or empty.\n" +
+                    "Command: \"$utterance\""
+            ).text
+        })
+        lifecycleScope.launch {
+            val thinking = gemmaLog("…")
+            val cmd = router.parse(text)
+            thinking?.let { gemmaLogHost?.removeView(it) }
+            executeVoiceCommand(cmd)
+        }
+    }
+
+    private fun executeVoiceCommand(cmd: com.deanwaylabs.quietos.voice.VoiceCommand) {
+        when (cmd.intent) {
+            VoiceIntent.BLOCK -> {
+                val n = BlocklistStore.normalize(cmd.target)
+                if (n.length < 7) {
+                    gemmaLog("→ I need a number — say “block” followed by the digits.")
+                } else {
+                    val added = BlocklistStore(this).add(n)
+                    gemmaLog(if (added) "→ Blocked ${prettyNum(n)} — future calls rejected."
+                    else "→ ${prettyNum(n)} was already on the block list.")
+                }
+            }
+            VoiceIntent.UNBLOCK -> {
+                val n = BlocklistStore.normalize(cmd.target)
+                if (n.length < 7) {
+                    gemmaLog("→ I need a number — say “unblock” followed by the digits.")
+                } else {
+                    val removed = BlocklistStore(this).remove(n)
+                    gemmaLog(if (removed) "→ Unblocked ${prettyNum(n)}."
+                    else "→ ${prettyNum(n)} wasn't on the block list.")
+                }
+            }
+            VoiceIntent.CALL -> {
+                val digits = cmd.target.filter { it.isDigit() }
+                when {
+                    digits.length >= 7 -> {
+                        gemmaLog("→ Opening dialer for ${prettyNum(digits)}…")
+                        startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$digits")))
+                    }
+                    cmd.target.isBlank() ->
+                        gemmaLog("→ Who should I call — say “call” followed by a name or number.")
+                    else -> lifecycleScope.launch {
+                        val found = withContext(Dispatchers.IO) {
+                            lookupContactNumber(cmd.target)
+                        }
+                        if (found != null) {
+                            gemmaLog("→ Opening dialer for ${cmd.target.trim()}…")
+                            startActivity(Intent(Intent.ACTION_DIAL,
+                                Uri.parse("tel:${found.filter { it.isDigit() }}")))
+                        } else {
+                            gemmaLog("→ I couldn't find “${cmd.target.trim()}” in your contacts.")
+                        }
+                    }
+                }
+            }
+            VoiceIntent.UNKNOWN ->
+                gemmaLog("→ I didn't catch a command in that — try “block …” or “call …”.")
+        }
+    }
+
+    private fun lookupContactNumber(name: String): String? = runCatching {
+        val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+        contentResolver.query(
+            uri,
+            arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+            arrayOf("%${name.trim()}%"),
+            null
+        )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    }.getOrNull()
+
+    private fun prettyNum(digits: String): String {
+        val d = digits.filter { it.isDigit() }
+        return if (d.length == 10)
+            "(${d.substring(0, 3)}) ${d.substring(3, 6)}-${d.substring(6)}"
+        else d
     }
 
     private fun stylePill(pill: TextView, selected: Boolean, accent: Int) {
