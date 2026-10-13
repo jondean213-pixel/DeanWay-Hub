@@ -11,6 +11,9 @@ data class CallDecision(val risk: CallRisk, val silence: Boolean, val block: Boo
 class CallRiskEngine(private val context: Context) {
     fun classify(number: String?): CallDecision {
         val n = number?.trim().orEmpty()
+        // Jon's manual blocklist always wins — even over saved contacts.
+        if (BlocklistStore(context).isBlocked(n))
+            return CallDecision(CallRisk.BLOCKED, false, true, "manually blocked")
         if (n.isBlank()) return CallDecision(CallRisk.SUSPICIOUS, true, false, "hidden or unavailable caller ID")
         if (isContact(n)) return CallDecision(CallRisk.TRUSTED, false, false, "saved contact")
         return CallDecision(CallRisk.UNKNOWN, true, false, "unknown caller; silenced")

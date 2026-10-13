@@ -47,6 +47,9 @@ import com.deanwaylabs.quietos.ai.ModelState
 import com.deanwaylabs.quietos.attention.AttentionClass
 import com.deanwaylabs.quietos.attention.AttentionRecord
 import com.deanwaylabs.quietos.attention.AttentionRepository
+import com.deanwaylabs.quietos.calls.BlocklistStore
+import com.deanwaylabs.quietos.calls.CallScreeningLog
+import com.deanwaylabs.quietos.calls.ScreenedCall
 import com.deanwaylabs.quietos.messages.MessageSpamLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -162,6 +165,7 @@ class NetworkHubActivity : AppCompatActivity() {
     private val stageTabs = mutableMapOf<String, Int>()
     private var spamTodayText: TextView? = null
     private var spamTotalText: TextView? = null
+    private var spamCallsHost: LinearLayout? = null
 
     /** Live panel refresh: re-reads sources every 5s while resumed. */
     private val refreshHandler = Handler(Looper.getMainLooper())
@@ -851,7 +855,7 @@ class NetworkHubActivity : AppCompatActivity() {
         card.addView(titleRow)
 
         if (b.key == "spam") {
-            // stats + action (rect too short for rows at legible sizes)
+            // stats + recent screened calls (with Block buttons) + action
             val stats = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
@@ -860,7 +864,12 @@ class NetworkHubActivity : AppCompatActivity() {
             stats.addView(compactStat("Blocked\nToday", "0") { spamTodayText = it })
             stats.addView(compactStat("Total\nBlocked", "0") { spamTotalText = it })
             card.addView(stats)
-            refreshSpamStats()
+            val callsHost = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            spamCallsHost = callsHost
+            card.addView(callsHost)
+            refreshSpamStage()
         } else {
             // tabs (first 3, like the graphic's pill row)
             val tabs = b.tabs.take(3)
@@ -1027,7 +1036,8 @@ class NetworkHubActivity : AppCompatActivity() {
      * the full-screen expanded view. `detailed` adds the subtitle line.
      */
     private fun bucketListViews(b: BucketUi, tabName: String, limit: Int,
-                                detailed: Boolean): List<View> {
+                                detailed: Boolean,
+                                onChanged: () -> Unit = {}): List<View> {
         val views = mutableListOf<View>()
         fun addItems(items: List<ItemRow>) {
             if (items.isEmpty()) views += compactEmpty()
@@ -1052,7 +1062,15 @@ class NetworkHubActivity : AppCompatActivity() {
                 "Filtered" -> addItems(quietItems().take(limit))
                 else -> views += compactEmpty("QUIET keeps it silent.")
             }
-            "spam" -> addSpam(spamEntries().take(limit))
+            "spam" -> when (tabName) {
+                "Calls" -> views += spamCallViews(limit, detailed, onChanged)
+                "Block List" -> views += blocklistViews(limit, detailed, onChanged)
+                "Logs" -> addSpam(spamEntries().take(limit))
+                else -> views += compactEmpty(
+                    "Unknown callers are silenced — no ring, they can leave voicemail.\n" +
+                    "Saved contacts always ring through.\n" +
+                    "Numbers you block are rejected outright.")
+            }
         }
         return views
     }
@@ -1086,17 +1104,163 @@ class NetworkHubActivity : AppCompatActivity() {
         return row
     }
 
-    /** Re-reads the spam log into the stage SPAM SHIELD stats. */
-    private fun refreshSpamStats() {
+    /** Re-reads the spam log into the stage SPAM SHIELD stats + recent screened calls. */
+    private fun refreshSpamStage() {
         val entries = spamEntries()
         spamTodayText?.text = entries.count { it.timeMs >= startOfToday() }.toString()
         spamTotalText?.text = entries.size.toString()
+        val host = spamCallsHost ?: return
+        host.removeAllViews()
+        spamCallViews(limit = 2, detailed = false) { refreshSpamStage() }
+            .forEach { host.addView(it) }
+    }
+
+    /**
+     * Screened-call rows with Block/Unblock toggle buttons. Shared by the
+     * compact stage panel and the full-screen expanded view.
+     */
+    private fun spamCallViews(limit: Int, detailed: Boolean,
+                              onChanged: () -> Unit): List<View> {
+        val accent = buckets.first { it.key == "spam" }.accent
+        val store = BlocklistStore(this)
+        val calls = screenedCalls().take(limit)
+        if (calls.isEmpty()) return listOf(compactEmpty("No screened calls yet."))
+        return calls.map { call -> spamCallRow(call, accent, detailed, store, onChanged) }
+    }
+
+    private fun spamCallRow(call: ScreenedCall, accent: Int, detailed: Boolean,
+                            store: BlocklistStore, onChanged: () -> Unit): View {
+        val blocked = store.isBlocked(call.number)
+        // Old log entries stored masked numbers ("***1234") — show them, but no Block button.
+        val canBlock = !call.number.startsWith("***") &&
+            BlocklistStore.normalize(call.number).isNotEmpty()
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(120, 20, 28, 50))
+                cornerRadius = dp(8).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+        }
+        val textBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        textBox.addView(TextView(this).apply {
+            text = (if (blocked) "🚫 " else "") +
+                call.number.ifBlank { "Hidden caller" }
+            textSize = if (detailed) 14f else 11f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            setSingleLine()
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        val sub = listOf(call.risk.lowercase(), call.reason, fmtTime(call.timeMs))
+            .filter { it.isNotBlank() }.joinToString("  •  ")
+        textBox.addView(TextView(this).apply {
+            text = sub
+            textSize = if (detailed) 12f else 9f
+            setTextColor(DIM)
+            setSingleLine()
+            ellipsize = TextUtils.TruncateAt.END
+        })
+        row.addView(textBox)
+        if (canBlock) {
+            row.addView(Button(this).apply {
+                text = if (blocked) "Unblock" else "Block"
+                textSize = if (detailed) 12f else 10f
+                setTextColor(TEXT)
+                isAllCaps = false
+                minimumWidth = 0
+                setPadding(dp(10), dp(2), dp(10), dp(2))
+                background = GradientDrawable().apply {
+                    setColor(Color.argb(if (blocked) 150 else 90,
+                        Color.red(accent), Color.green(accent), Color.blue(accent)))
+                    setStroke(dp(1), accent)
+                    cornerRadius = dp(8).toFloat()
+                }
+                // A clickable child consumes the tap, so the panel's
+                // "open expanded view" listener won't fire on Block taps.
+                setOnClickListener {
+                    if (store.isBlocked(call.number)) {
+                        store.remove(call.number)
+                        toast("Unblocked ${call.number}.")
+                    } else {
+                        store.add(call.number)
+                        toast("Blocked ${call.number} — future calls rejected.")
+                    }
+                    onChanged()
+                }
+            })
+        }
+        return row
+    }
+
+    /**
+     * Manually blocked numbers with an Unblock affordance each.
+     * Shown on the SPAM SHIELD "Block List" tab.
+     */
+    private fun blocklistViews(limit: Int, detailed: Boolean,
+                               onChanged: () -> Unit): List<View> {
+        val accent = buckets.first { it.key == "spam" }.accent
+        val store = BlocklistStore(this)
+        val numbers = store.all().take(limit)
+        if (numbers.isEmpty()) return listOf(compactEmpty("No blocked numbers yet."))
+        return numbers.map { number ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+                background = GradientDrawable().apply {
+                    setColor(Color.argb(120, 20, 28, 50))
+                    cornerRadius = dp(8).toFloat()
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+            }
+            row.addView(TextView(this).apply {
+                text = "🚫 $number"
+                textSize = if (detailed) 14f else 11f
+                setTextColor(TEXT)
+                typeface = Typeface.DEFAULT_BOLD
+                setSingleLine()
+                ellipsize = TextUtils.TruncateAt.END
+                layoutParams = LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            })
+            row.addView(Button(this).apply {
+                text = "Unblock"
+                textSize = if (detailed) 12f else 10f
+                setTextColor(TEXT)
+                isAllCaps = false
+                minimumWidth = 0
+                setPadding(dp(10), dp(2), dp(10), dp(2))
+                background = GradientDrawable().apply {
+                    setColor(Color.argb(150,
+                        Color.red(accent), Color.green(accent), Color.blue(accent)))
+                    setStroke(dp(1), accent)
+                    cornerRadius = dp(8).toFloat()
+                }
+                setOnClickListener {
+                    store.remove(number)
+                    toast("Unblocked $number.")
+                    onChanged()
+                }
+            })
+            row
+        }
     }
 
     /** Re-reads all live sources into every stage panel. Safe to call repeatedly. */
     private fun refreshAllStageBuckets() {
         for (b in buckets) {
-            if (b.key == "spam") refreshSpamStats()
+            if (b.key == "spam") refreshSpamStage()
             else refreshStageBucket(b)
         }
         refreshAttentionStatus()
@@ -1163,7 +1327,7 @@ class NetworkHubActivity : AppCompatActivity() {
         fun renderList() {
             listHost.removeAllViews()
             val tabName = b.tabs.getOrElse(selTab) { "" }
-            if (b.key == "spam") {
+            if (b.key == "spam" && tabName == "Calls") {
                 val entries = spamEntries()
                 val statsRow = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -1176,7 +1340,7 @@ class NetworkHubActivity : AppCompatActivity() {
                     entries.size.toString()))
                 listHost.addView(statsRow)
             }
-            bucketListViews(b, tabName, 50, detailed = true)
+            bucketListViews(b, tabName, 50, detailed = true) { renderList() }
                 .forEach { listHost.addView(it) }
         }
         b.tabs.forEachIndexed { i, name ->
@@ -1374,6 +1538,10 @@ class NetworkHubActivity : AppCompatActivity() {
             }
 
     private data class SpamEntry(val title: String, val sub: String, val timeMs: Long)
+
+    /** Screened incoming calls (CallScreeningService log), newest first. */
+    private fun screenedCalls(): List<ScreenedCall> =
+        try { CallScreeningLog(this).readAll() } catch (e: Exception) { emptyList() }
 
     private fun spamEntries(): List<SpamEntry> =
         try {
