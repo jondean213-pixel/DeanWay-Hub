@@ -11,9 +11,9 @@ data class CallDecision(val risk: CallRisk, val silence: Boolean, val block: Boo
 class CallRiskEngine(private val context: Context) {
     fun classify(number: String?): CallDecision {
         val n = number?.trim().orEmpty()
-        if (n.isBlank()) return CallDecision(CallRisk.SUSPICIOUS, true, false, "hidden or unavailable caller ID")
+        if (n.isBlank()) return CallDecision(CallRisk.SUSPICIOUS, false, true, "hidden caller ID; strict blocking")
         if (isContact(n)) return CallDecision(CallRisk.TRUSTED, false, false, "saved contact")
-        return CallDecision(CallRisk.UNKNOWN, false, false, "unknown caller; learning mode")
+        return CallDecision(CallRisk.BLOCKED, false, true, "unknown caller; strict blocking")
     }
     private fun isContact(number: String): Boolean = runCatching {
         val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
