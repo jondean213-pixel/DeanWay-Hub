@@ -2,10 +2,16 @@ package com.deanwaylabs.quietos.network
 
 import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RadialGradient
+import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.LayerDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -22,8 +28,8 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
@@ -42,6 +48,8 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.min
+import kotlin.random.Random
 
 /**
  * QuietOS Network Hub — MOTOROLA flavor.
@@ -50,15 +58,18 @@ import java.util.Locale
  * class lives ONLY in flavor source sets, never in main — AGP treats a
  * main+flavor duplicate as a redeclaration error).
  *
- * Built to Jon's concept graphic, exactly: Gemma at center as the
- * activator, NOW / SOON / DIGEST / QUIET / SPAM SHIELD orbiting as neon
- * satellite nodes. Revision 2026-10-12 (Jon's field verdict on CI194):
- * the hub IS the app on Motorola — MainActivity auto-forwards here —
- * and EVERYTHING lives on one scrolling page. All five workspace panels
- * render inline, permanently open; tapping an orbit node smooth-scrolls
- * to its panel. The old MainActivity functions (model picker, attention
- * engine) fold into the SYSTEM panel below NETWORK. Neon/glow treatment
- * Jon-approved for this screen.
+ * Visual fidelity pass 2026-10-12 (Jon's field verdict on CI195: "dull",
+ * missing the graphic's glowing connection lines, workspaces must sit
+ * BESIDE their nodes): procedural cosmic background (nebula blobs +
+ * starfield), Gemma medallion with violet halo, luminous bucket-colored
+ * connection lines fanning from the medallion to each node, nodes as dark
+ * spheres with THICK neon halos, and five bucket ROWS — node + its glassy
+ * glowing workspace panel side by side, exactly the adjacency the concept
+ * graphic shows. Portrait adaptation authorized by Jon.
+ *
+ * The hub IS the app on Motorola (MainActivity auto-forwards here).
+ * Everything lives on one scrolling page. All NETWORK/SYSTEM controls
+ * and data wiring preserved.
  *
  * Data honesty: lists are wired to real sources (attention log, token
  * claims, message spam log). No live source → honest empty state.
@@ -66,19 +77,16 @@ import java.util.Locale
  */
 class NetworkHubActivity : AppCompatActivity() {
 
-    // ---------- palette (from Jon's concept graphic) ----------
-    private val BG_TOP = Color.rgb(0x05, 0x08, 0x14)
-    private val BG_MID = Color.rgb(0x0A, 0x0F, 0x2E)
-    private val BG_BOT = Color.rgb(0x14, 0x0B, 0x33)
-    private val PANEL = Color.argb(242, 13, 20, 38)
+    // ---------- palette (saturated neon, from Jon's concept graphic) ----------
     private val TEXT = Color.rgb(0xEB, 0xF0, 0xFA)
     private val DIM = Color.rgb(0x9A, 0xA3, 0xB5)
-    private val GREEN = Color.rgb(0x2B, 0xFF, 0x88)   // NOW
-    private val ORANGE = Color.rgb(0xFF, 0xAA, 0x33)  // SOON
-    private val BLUE = Color.rgb(0x3F, 0xA9, 0xFF)    // DIGEST
-    private val PURPLE = Color.rgb(0xB3, 0x66, 0xFF)  // QUIET
-    private val RED = Color.rgb(0xFF, 0x44, 0x55)     // SPAM SHIELD
-    private val VIOLET = Color.rgb(0xAA, 0x66, 0xFF)  // Gemma / network
+    private val GREEN = Color.rgb(0x00, 0xFF, 0x88)   // NOW
+    private val ORANGE = Color.rgb(0xFF, 0xAA, 0x00)  // SOON
+    private val BLUE = Color.rgb(0x00, 0xAA, 0xFF)    // DIGEST
+    private val PURPLE = Color.rgb(0xCC, 0x66, 0xFF)  // QUIET
+    private val RED = Color.rgb(0xFF, 0x33, 0x44)    // SPAM SHIELD
+    private val VIOLET = Color.rgb(0x8A, 0x4D, 0xFF)  // Gemma / network
+    private val SCRIPT_LAV = Color.rgb(0xC9, 0xA0, 0xFF)
 
     private data class BucketUi(
         val key: String,
@@ -102,10 +110,18 @@ class NetworkHubActivity : AppCompatActivity() {
             listOf("Calls", "Block List", "Logs", "Settings"), "Manage Spam Protection")
     )
 
+    private val bucketIcons = mapOf(
+        "now" to "⚡",
+        "soon" to "◷",
+        "digest" to "☰",
+        "quiet" to "☾",
+        "spam" to "🛡"
+    )
+
     private data class ItemRow(val title: String, val sub: String)
 
-    /** Max rows rendered per inline panel — the page is one scroll, no nested scrollers. */
-    private val MAX_ROWS = 15
+    /** Max item rows rendered per workspace panel. */
+    private val MAX_ROWS = 5
 
     private lateinit var manager: NetworkManager
     private var statusStrip: TextView? = null
@@ -115,7 +131,12 @@ class NetworkHubActivity : AppCompatActivity() {
 
     // single-page dashboard refs
     private var pageScroll: ScrollView? = null
-    private val panelViews = mutableMapOf<String, View>()
+    private var contentRoot: FrameLayout? = null
+    private var colView: LinearLayout? = null
+    private var linesView: LinesView? = null
+    private var gemmaMedallion: View? = null
+    private val rowViews = mutableMapOf<String, View>()
+    private val nodeViews = mutableMapOf<String, View>()
     private val bucketHosts = mutableMapOf<String, LinearLayout>()
     private val bucketTabs = mutableMapOf<String, Int>()
 
@@ -131,6 +152,15 @@ class NetworkHubActivity : AppCompatActivity() {
     private var attentionStatus: TextView? = null
     private var interceptionButton: Button? = null
 
+    private val gemmaScript: Typeface by lazy {
+        try {
+            ResourcesCompat.getFont(this, R.font.gemma_script)
+                ?: Typeface.create(Typeface.SERIF, Typeface.ITALIC)
+        } catch (e: Exception) {
+            Typeface.create(Typeface.SERIF, Typeface.ITALIC)
+        }
+    }
+
     private val picker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             runCatching {
@@ -142,6 +172,202 @@ class NetworkHubActivity : AppCompatActivity() {
     }
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    private fun dpf(v: Float): Float = v * resources.displayMetrics.density
+
+    // ================= custom visual layer =================
+
+    /** Procedural cosmic background: near-black space, nebula blobs, starfield. */
+    private inner class CosmosView(context: android.content.Context) : View(context) {
+        private var bmp: Bitmap? = null
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            if (w <= 0 || h <= 0) return
+            val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val c = Canvas(b)
+            c.drawColor(Color.rgb(0x05, 0x05, 0x10))
+            // nebula blobs: (x%, y%, radius%, color, alpha)
+            val blobs = listOf(
+                floatArrayOf(0.50f, 0.16f, 0.55f, 0x6A.toFloat(), 0x3D.toFloat(), 0xF0.toFloat(), 88f),
+                floatArrayOf(0.10f, 0.44f, 0.42f, 0x2A.toFloat(), 0x1A.toFloat(), 0x8A.toFloat(), 80f),
+                floatArrayOf(0.90f, 0.55f, 0.44f, 0x10.toFloat(), 0x2A.toFloat(), 0x6A.toFloat(), 80f),
+                floatArrayOf(0.50f, 0.86f, 0.52f, 0x3A.toFloat(), 0x0A.toFloat(), 0x6A.toFloat(), 70f),
+                floatArrayOf(0.20f, 0.07f, 0.30f, 0x0A.toFloat(), 0x2A.toFloat(), 0x6A.toFloat(), 60f),
+                floatArrayOf(0.82f, 0.30f, 0.26f, 0x7A.toFloat(), 0x2B.toFloat(), 0xD0.toFloat(), 55f)
+            )
+            val rnd = Random(7)
+            for (bl in blobs) {
+                val cx = bl[0] * w
+                val cy = bl[1] * h
+                val rad = bl[2] * min(w, h)
+                val col = Color.argb(bl[6].toInt(), bl[3].toInt(), bl[4].toInt(), bl[5].toInt())
+                paint.shader = RadialGradient(cx, cy, rad, col, Color.TRANSPARENT,
+                    Shader.TileMode.CLAMP)
+                c.drawCircle(cx, cy, rad, paint)
+            }
+            paint.shader = null
+            // starfield
+            for (i in 0 until 150) {
+                val sx = rnd.nextFloat() * w
+                val sy = rnd.nextFloat() * h
+                val sr = (0.6f + rnd.nextFloat() * 1.6f) * resources.displayMetrics.density / 3f
+                val tint = rnd.nextFloat()
+                paint.color = when {
+                    tint < 0.12f -> Color.argb(200, 170, 204, 255)
+                    tint < 0.20f -> Color.argb(200, 204, 153, 255)
+                    else -> Color.argb(90 + rnd.nextInt(165), 255, 255, 255)
+                }
+                c.drawCircle(sx, sy, sr, paint)
+            }
+            bmp = b
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            bmp?.let { canvas.drawBitmap(it, 0f, 0f, null) }
+                ?: canvas.drawColor(Color.rgb(0x05, 0x05, 0x10))
+        }
+    }
+
+    /** Dark sphere with a THICK neon halo (real shadow-layer glow). */
+    private inner class GlowCircleView(context: android.content.Context, val accent: Int,
+                                       val haloDp: Float = 16f) : View(context) {
+        private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = accent
+        }
+        private val spherePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        private val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = Color.argb(200, 255, 255, 255)
+        }
+
+        init { setLayerType(LAYER_TYPE_SOFTWARE, null) }
+
+        override fun onDraw(canvas: Canvas) {
+            val cx = width / 2f
+            val cy = height / 2f
+            val pad = dpf(haloDp) + dpf(4f)
+            val r = min(width, height) / 2f - pad
+            if (r <= 0) return
+            glowPaint.strokeWidth = dpf(7f)
+            glowPaint.setShadowLayer(dpf(haloDp), 0f, 0f, accent)
+            canvas.drawCircle(cx, cy, r, glowPaint)
+            glowPaint.clearShadowLayer()
+            spherePaint.shader = RadialGradient(cx, cy - r * 0.25f, r * 0.15f, Color.rgb(0x2E, 0x2E, 0x58),
+                Color.rgb(0x0A, 0x0A, 0x1C), Shader.TileMode.CLAMP)
+            canvas.drawCircle(cx, cy, r - dpf(4f), spherePaint)
+            rimPaint.strokeWidth = dpf(1.5f)
+            canvas.drawCircle(cx, cy, r - dpf(4f), rimPaint)
+        }
+    }
+
+    /** Glassy panel: dark translucent fill, glowing neon border, top highlight. */
+    private inner class NeonPanelView(context: android.content.Context, val accent: Int)
+        : LinearLayout(context) {
+        private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = accent
+        }
+        private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            color = Color.argb(208, 15, 17, 38)
+        }
+        private val hiPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            color = Color.argb(80, 255, 255, 255)
+        }
+        private val rect = RectF()
+        private val radius = dpf(18f)
+
+        init {
+            setWillNotDraw(false)
+            setLayerType(LAYER_TYPE_SOFTWARE, null)
+            orientation = VERTICAL
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            val pad = dpf(11f)
+            rect.set(pad, pad, width - pad, height - pad)
+            glowPaint.strokeWidth = dpf(2.5f)
+            glowPaint.setShadowLayer(dpf(10f), 0f, 0f, accent)
+            canvas.drawRoundRect(rect, radius, radius, glowPaint)
+            glowPaint.clearShadowLayer()
+            canvas.drawRoundRect(rect, radius, radius, fillPaint)
+            hiPaint.strokeWidth = dpf(1f)
+            canvas.drawLine(rect.left + radius, rect.top + dpf(2f),
+                rect.right - radius, rect.top + dpf(2f), hiPaint)
+            super.onDraw(canvas)
+        }
+    }
+
+    private data class Line(val x1: Float, val y1: Float,
+                            val x2: Float, val y2: Float, val color: Int)
+
+    /** Luminous connection lines fanning from Gemma's medallion to each node. */
+    private inner class LinesView(context: android.content.Context) : View(context) {
+        private var lines: List<Line> = emptyList()
+        private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+        }
+        private val corePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            color = Color.argb(200, 255, 255, 255)
+        }
+        private val path = Path()
+
+        init { setLayerType(LAYER_TYPE_SOFTWARE, null) }
+
+        fun setLines(l: List<Line>) {
+            lines = l
+            invalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            for (ln in lines) {
+                path.reset()
+                path.moveTo(ln.x1, ln.y1)
+                val mx = (ln.x1 + ln.x2) / 2f
+                val my = (ln.y1 + ln.y2) / 2f
+                // gentle outward bow
+                val bow = if (ln.x2 >= ln.x1) -dpf(18f) else dpf(18f)
+                path.quadTo(mx + bow, my, ln.x2, ln.y2)
+                glowPaint.strokeWidth = dpf(5f)
+                glowPaint.color = ln.color
+                glowPaint.alpha = 210
+                glowPaint.setShadowLayer(dpf(16f), 0f, 0f, ln.color)
+                canvas.drawPath(path, glowPaint)
+                glowPaint.clearShadowLayer()
+                corePaint.strokeWidth = dpf(1.8f)
+                canvas.drawPath(path, corePaint)
+            }
+        }
+    }
+
+    /** Tiny waveform bars under Gemma's name, like the graphic. */
+    private inner class WaveformView(context: android.content.Context) : View(context) {
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = VIOLET }
+        private val heights = intArrayOf(4, 7, 10, 14, 18, 24, 30, 36, 30, 24, 18,
+            14, 10, 8, 10, 14, 20, 28, 34, 28, 20, 14, 10, 7, 5, 4)
+
+        override fun onDraw(canvas: Canvas) {
+            val n = heights.size
+            val gap = dpf(3f)
+            val bw = dpf(3f)
+            val totalW = n * (bw + gap) - gap
+            var x = (width - totalW) / 2f
+            val maxH = heights.maxOrNull() ?: 1
+            for (h in heights) {
+                val bh = height * h / maxH.toFloat()
+                canvas.drawRect(x, (height - bh) / 2f, x + bw, (height + bh) / 2f, paint)
+                x += bw + gap
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -156,74 +382,123 @@ class NetworkHubActivity : AppCompatActivity() {
     // ================= single-page dashboard =================
 
     private fun buildUi(): View {
-        val root = FrameLayout(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(BG_TOP, BG_MID, BG_BOT)
-            )
-        }
+        val root = FrameLayout(this)
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             view.setPadding(0, bars.top, 0, bars.bottom)
             insets
         }
 
+        // cosmic background, full-bleed behind everything
+        root.addView(CosmosView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT)
+        })
+
         val scroll = ScrollView(this).apply { isFillViewport = true }
         pageScroll = scroll
+
+        val content = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT)
+        }
+        contentRoot = content
+
+        val lv = LinesView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, 1)
+        }
+        linesView = lv
+        content.addView(lv)
+
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(16))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT)
+            setPadding(dp(14), dp(6), dp(14), dp(14))
         }
+        colView = col
 
-        // ---- 1. header ----
-        col.addView(centerLabel("QuietOS", 34f, TEXT, bold = true).apply {
-            letterSpacing = 0.1f
+        // ---- 1. header: corners + centered title ----
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        topRow.addView(TextView(this).apply {
+            text = "DeanWay LLC"
+            textSize = 12f
+            setTextColor(Color.rgb(0x4D, 0xA6, 0xFF))
+        })
+        topRow.addView(View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+        })
+        topRow.addView(TextView(this).apply {
+            text = "Your Phone. Your Rules."
+            textSize = 12f
+            setTextColor(Color.rgb(0xB3, 0x66, 0xFF))
+        })
+        col.addView(topRow)
+        col.addView(centerLabel("QuietOS", 36f, TEXT, bold = true).apply {
+            letterSpacing = 0.08f
+            setPadding(0, dp(2), 0, 0)
         })
         col.addView(centerLabel("BY DEANWAY LABS", 12f, DIM).apply {
             letterSpacing = 0.35f
         })
         col.addView(centerLabel("FOCUS  •  CONTROL  •  PEACE", 12f, DIM).apply {
             letterSpacing = 0.3f
-            setPadding(0, dp(2), 0, dp(4))
+            setPadding(0, dp(2), 0, dp(2))
         })
 
-        // ---- 2. orbit field (compact; nodes scroll to panels) ----
-        col.addView(buildOrbit())
+        // ---- 2. Gemma anchor ----
+        col.addView(buildGemma())
 
-        // ---- network status strip (tap → scroll to NETWORK panel) ----
+        // ---- network status strip (tap → scroll to NETWORK) ----
         statusStrip = TextView(this).apply {
             textSize = 13f
             setTextColor(DIM)
             gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, dp(6))
-            background = roundedBg(Color.argb(160, 13, 20, 38), VIOLET, dp(12))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            background = GradientDrawable().apply {
+                setColor(Color.argb(150, 15, 17, 38))
+                setStroke(dp(1), VIOLET)
+                cornerRadius = dp(14).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply {
+                    topMargin = dp(10)
+                    bottomMargin = dp(4)
+                }
             isClickable = true
             isFocusable = true
-            setOnClickListener { scrollToPanel("network") }
+            setOnClickListener { scrollToRow("network") }
         }
         col.addView(statusStrip)
 
-        // ---- 3. all five workspace panels, inline and permanently open ----
+        // ---- 3. five bucket rows: node + its workspace panel, side by side ----
         for (b in buckets) {
-            val panel = inlinePanel(b)
-            panelViews[b.key] = panel
-            col.addView(panel)
+            col.addView(buildBucketRow(b))
         }
 
         // ---- 4. NETWORK panel (classic hub controls) ----
         val netPanel = buildNetworkPanel()
-        panelViews["network"] = netPanel
+        rowViews["network"] = netPanel
         col.addView(netPanel)
 
         // ---- 5. SYSTEM panel (folded-in MainActivity functions) ----
         val sysPanel = buildSystemPanel()
-        panelViews["system"] = sysPanel
+        rowViews["system"] = sysPanel
         col.addView(sysPanel)
 
         // ---- 6. footer ----
         col.addView(centerLabel("DEANWAY LABS", 13f, TEXT, bold = true).apply {
             letterSpacing = 0.35f
-            setPadding(0, dp(14), 0, 0)
+            setPadding(0, dp(16), 0, 0)
         })
         col.addView(centerLabel("BUILDING A QUIETER TOMORROW", 10f, DIM).apply {
             letterSpacing = 0.25f
@@ -237,117 +512,214 @@ class NetworkHubActivity : AppCompatActivity() {
             setPadding(0, dp(2), 0, 0)
         })
 
-        scroll.addView(col)
+        content.addView(col)
+        scroll.addView(content)
         root.addView(scroll)
+
+        // draw the connection lines once everything is laid out
+        content.post { requestLinesRedraw() }
         return root
     }
 
-    private fun scrollToPanel(key: String) {
-        val v = panelViews[key] ?: return
-        pageScroll?.smoothScrollTo(0, v.top)
-    }
-
-    private fun buildOrbit(): View {
-        val orbit = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(470))
-        }
-
-        // Gemma medallion, centered
-        val gemmaStack = LinearLayout(this).apply {
+    /** Gemma medallion: violet halo, portrait, script name, waveform, quote. */
+    private fun buildGemma(): View {
+        val stack = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+            setPadding(0, dp(6), 0, dp(2))
         }
         val medallion = FrameLayout(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(176), dp(176))
-            background = gemmaRing()
+            layoutParams = LinearLayout.LayoutParams(dp(208), dp(208))
             isClickable = true
             isFocusable = true
             setOnClickListener { showGemma() }
         }
+        gemmaMedallion = medallion
+        medallion.addView(GlowCircleView(this, VIOLET, 22f).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT)
+        })
         medallion.addView(ImageView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(dp(156), dp(156), Gravity.CENTER)
+            layoutParams = FrameLayout.LayoutParams(dp(178), dp(178), Gravity.CENTER)
             setImageResource(R.drawable.gemma_portrait)
             contentDescription = "Gemma"
         })
-        gemmaStack.addView(medallion)
-        gemmaStack.addView(centerLabel("Gemma", 22f, VIOLET).apply {
-            typeface = Typeface.create(Typeface.SERIF, Typeface.ITALIC)
-            setPadding(0, dp(4), 0, 0)
-        })
-        gemmaStack.addView(centerLabel("YOUR AI ASSISTANT", 11f, DIM).apply {
-            letterSpacing = 0.3f
-        })
-        gemmaStack.addView(centerLabel("“I’ve got you.”", 13f, TEXT).apply {
+        stack.addView(medallion)
+        stack.addView(TextView(this).apply {
+            text = "Gemma"
+            textSize = 32f
+            setTextColor(SCRIPT_LAV)
+            typeface = gemmaScript
+            gravity = Gravity.CENTER
             setPadding(0, dp(2), 0, 0)
         })
-        orbit.addView(gemmaStack)
-
-        // Satellite nodes — positions mirror the graphic; tap scrolls to the panel
-        val nodeDefs = listOf(
-            buckets[0] to (Gravity.TOP or Gravity.START),      // NOW top-left
-            buckets[1] to (Gravity.TOP or Gravity.END),        // SOON top-right
-            buckets[2] to (Gravity.START or Gravity.CENTER_VERTICAL), // DIGEST mid-left
-            buckets[3] to (Gravity.END or Gravity.CENTER_VERTICAL),   // QUIET mid-right
-            buckets[4] to (Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL) // SPAM SHIELD bottom-center
-        )
-        for ((b, grav) in nodeDefs) {
-            val node = nodeButton(b)
-            val lp = FrameLayout.LayoutParams(dp(96), dp(96), grav)
-            val m = dp(10)
-            when (grav) {
-                Gravity.TOP or Gravity.START -> lp.setMargins(m, dp(4), 0, 0)
-                Gravity.TOP or Gravity.END -> lp.setMargins(0, dp(4), m, 0)
-                Gravity.START or Gravity.CENTER_VERTICAL -> lp.setMargins(dp(4), 0, 0, 0)
-                Gravity.END or Gravity.CENTER_VERTICAL -> lp.setMargins(0, 0, dp(4), 0)
-                else -> lp.setMargins(0, 0, 0, dp(2))
+        stack.addView(centerLabel("YOUR AI ASSISTANT", 11f, DIM).apply {
+            letterSpacing = 0.3f
+        })
+        stack.addView(WaveformView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(130), dp(26)).apply {
+                topMargin = dp(4)
+                gravity = Gravity.CENTER_HORIZONTAL
             }
-            node.layoutParams = lp
-            node.setOnClickListener { scrollToPanel(b.key) }
-            orbit.addView(node)
-        }
-        return orbit
+        })
+        stack.addView(centerLabel("“I’ve got you.”", 13f, TEXT).apply {
+            setPadding(0, dp(2), 0, 0)
+        })
+        return stack
     }
 
-    // ================= inline workspace panels =================
-
     /**
-     * Workspace card rendered INLINE on the page — permanently open, like
-     * the concept graphic. Tabs re-render the list in place; the list is
-     * fully expanded (capped at MAX_ROWS) so the page has exactly one
-     * scroller and nothing hides behind a tap.
+     * One bucket ROW: the neon node sphere on the left, its workspace
+     * panel filling the rest of the row — the adjacency from the graphic.
      */
-    private fun inlinePanel(b: BucketUi): View {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+    private fun buildBucketRow(b: BucketUi): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.TOP
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply {
-                    topMargin = dp(14)
-                }
-            background = GradientDrawable().apply {
-                setColor(PANEL)
-                setStroke(dp(2), b.accent)
-                cornerRadius = dp(18).toFloat()
+                .apply { topMargin = dp(12) }
+        }
+        rowViews[b.key] = row
+
+        // node sphere
+        val nodeSize = dp(118)
+        val node = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(nodeSize, nodeSize).apply {
+                marginEnd = dp(10)
             }
-            setPadding(dp(14), dp(10), dp(14), dp(12))
+            isClickable = true
+            isFocusable = true
+        }
+        node.addView(GlowCircleView(this, b.accent, 15f).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT)
+        })
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        stack.addView(TextView(this).apply {
+            text = bucketIcons[b.key] ?: "◉"
+            textSize = 26f
+            setTextColor(b.accent)
+            gravity = Gravity.CENTER
+        })
+        stack.addView(TextView(this).apply {
+            text = b.title
+            textSize = 12.5f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, dp(3), 0, 0)
+        })
+        stack.addView(TextView(this).apply {
+            text = b.tagline
+            textSize = 7f
+            setTextColor(b.accent)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(2), 0, 0)
+        })
+        node.addView(stack)
+        nodeViews[b.key] = node
+        node.setOnClickListener { scrollToRow(b.key) }
+        row.addView(node)
+
+        // workspace panel beside the node
+        val panel = buildBucketPanel(b)
+        panel.layoutParams = LinearLayout.LayoutParams(0,
+            LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        row.addView(panel)
+        return row
+    }
+
+    private fun scrollToRow(key: String) {
+        val row = rowViews[key] ?: return
+        val scroll = pageScroll ?: return
+        val root = contentRoot ?: return
+        val y = yIn(root, row) - (scroll.height - row.height) / 2
+        scroll.smoothScrollTo(0, y.toInt().coerceAtLeast(0))
+    }
+
+    // ---------- connection-line geometry ----------
+
+    private fun xIn(root: View, v: View): Float {
+        var x = 0f
+        var c: View? = v
+        while (c != null && c !== root) {
+            x += c.left
+            c = c.parent as? View
+        }
+        return x
+    }
+
+    private fun yIn(root: View, v: View): Float {
+        var y = 0f
+        var c: View? = v
+        while (c != null && c !== root) {
+            y += c.top
+            c = c.parent as? View
+        }
+        return y
+    }
+
+    /** Recompute luminous lines from Gemma's medallion to each node. */
+    private fun requestLinesRedraw() {
+        val root = contentRoot ?: return
+        val col = colView ?: return
+        val lv = linesView ?: return
+        val med = gemmaMedallion ?: return
+        root.post {
+            val lines = mutableListOf<Line>()
+            val mx = xIn(root, med) + med.width / 2f
+            val my = yIn(root, med) + med.height - dpf(10f)
+            for (b in buckets) {
+                val node = nodeViews[b.key] ?: continue
+                if (node.width == 0) continue
+                val nx = xIn(root, node) + node.width / 2f
+                val ny = yIn(root, node) + node.height / 2f
+                lines.add(Line(mx, my, nx, ny, b.accent))
+            }
+            val lp = lv.layoutParams
+            if (lp.height != col.height && col.height > 0) {
+                lp.height = col.height
+                lv.layoutParams = lp
+            }
+            lv.setLines(lines)
+        }
+    }
+
+    // ================= workspace panels (glassy, glowing, beside their node) =================
+
+    /**
+     * Workspace card rendered beside its node — permanently open, like the
+     * concept graphic. Tabs re-render the list in place; the list is capped
+     * at MAX_ROWS so the page stays manageable. The PAGE scrolls, not the panel.
+     */
+    private fun buildBucketPanel(b: BucketUi): View {
+        val card = NeonPanelView(this, b.accent).apply {
+            setPadding(dp(22), dp(20), dp(22), dp(22))
         }
 
-        // title
         card.addView(TextView(this).apply {
             text = "${b.title} Workspace"
-            textSize = 19f
+            textSize = 17f
             setTextColor(TEXT)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, dp(2))
         })
-        card.addView(centerLabel(b.tagline, 10f, b.accent).apply {
+        card.addView(centerLabel(b.tagline, 9f, b.accent).apply {
             letterSpacing = 0.2f
             setPadding(0, 0, 0, dp(4))
         })
@@ -364,8 +736,8 @@ class NetworkHubActivity : AppCompatActivity() {
         b.tabs.forEachIndexed { i, name ->
             val pill = TextView(this).apply {
                 text = name
-                textSize = 13f
-                setPadding(dp(14), dp(7), dp(14), dp(7))
+                textSize = 12.5f
+                setPadding(dp(13), dp(7), dp(13), dp(7))
                 isClickable = true
                 isFocusable = true
             }
@@ -386,7 +758,7 @@ class NetworkHubActivity : AppCompatActivity() {
         tabScroll.addView(tabRow)
         card.addView(tabScroll)
 
-        // list area — fully expanded, capped; the PAGE scrolls, not the panel
+        // list area — capped; the PAGE scrolls, not the panel
         val listHost = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
         }
@@ -398,10 +770,10 @@ class NetworkHubActivity : AppCompatActivity() {
         // bottom action
         val action = Button(this).apply {
             text = b.actionLabel
-            textSize = 15f
+            textSize = 14f
             setTextColor(TEXT)
             background = GradientDrawable().apply {
-                setColor(Color.argb(90,
+                setColor(Color.argb(110,
                     Color.red(b.accent), Color.green(b.accent), Color.blue(b.accent)))
                 setStroke(dp(1), b.accent)
                 cornerRadius = dp(12).toFloat()
@@ -501,6 +873,8 @@ class NetworkHubActivity : AppCompatActivity() {
                 }
             }
         }
+        // panel heights changed → re-aim the connection lines
+        requestLinesRedraw()
     }
 
     private fun statCell(label: String, value: String, accent: Int): LinearLayout =
@@ -549,12 +923,12 @@ class NetworkHubActivity : AppCompatActivity() {
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
-            "quiet" -> scrollToPanel("spam")
+            "quiet" -> scrollToRow("spam")
             "spam" -> AlertDialog.Builder(this)
                 .setTitle("Spam Protection")
                 .setMessage("SPAM SHIELD is ON.\n\nCLEAN → relay now\n" +
                     "SUSPECT → relay flagged, Jon decides\n" +
-                    "SPAM → holds on the home phone\n\n" +
+                    "SPAM → held on the home phone\n\n" +
                     "VIPs (Noah Dean, Vanessa Brzeski, doctors) always come through.")
                 .setPositiveButton("OK", null)
                 .show()
@@ -584,74 +958,6 @@ class NetworkHubActivity : AppCompatActivity() {
             cornerRadius = radiusDp.toFloat()
         }
 
-    /** Neon ring: soft glow oval behind a crisp bright oval. */
-    private fun neonCircle(accent: Int): LayerDrawable {
-        val glow = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setStroke(dp(8), Color.argb(70,
-                Color.red(accent), Color.green(accent), Color.blue(accent)))
-            setColor(Color.TRANSPARENT)
-        }
-        val ring = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setStroke(dp(2), accent)
-            setColor(Color.argb(215, 8, 12, 26))
-        }
-        return LayerDrawable(arrayOf(glow, ring)).apply {
-            setLayerInset(1, dp(5), dp(5), dp(5), dp(5))
-        }
-    }
-
-    private fun gemmaRing(): LayerDrawable {
-        val halo = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setStroke(dp(10), Color.argb(60, 170, 102, 255))
-            setColor(Color.TRANSPARENT)
-        }
-        val ring = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setStroke(dp(3), VIOLET)
-            setColor(Color.TRANSPARENT)
-        }
-        val inner = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setStroke(dp(1), Color.argb(180, 230, 210, 255))
-            setColor(Color.TRANSPARENT)
-        }
-        return LayerDrawable(arrayOf(halo, ring, inner)).apply {
-            setLayerInset(1, dp(6), dp(6), dp(6), dp(6))
-            setLayerInset(2, dp(11), dp(11), dp(11), dp(11))
-        }
-    }
-
-    private fun nodeButton(b: BucketUi): FrameLayout {
-        val frame = FrameLayout(this).apply { background = neonCircle(b.accent) }
-        val stack = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT)
-            setPadding(dp(6), dp(6), dp(6), dp(6))
-        }
-        stack.addView(TextView(this).apply {
-            text = b.title
-            textSize = 13f
-            setTextColor(TEXT)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-        })
-        stack.addView(TextView(this).apply {
-            text = b.tagline
-            textSize = 7.5f
-            setTextColor(b.accent)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(2), 0, 0)
-        })
-        frame.addView(stack)
-        return frame
-    }
-
     private fun showGemma() {
         AlertDialog.Builder(this)
             .setTitle("Gemma")
@@ -664,9 +970,9 @@ class NetworkHubActivity : AppCompatActivity() {
         pill.setTextColor(if (selected) Color.WHITE else DIM)
         pill.background = GradientDrawable().apply {
             if (selected) {
-                setColor(Color.argb(110,
+                setColor(Color.argb(150,
                     Color.red(accent), Color.green(accent), Color.blue(accent)))
-                setStroke(dp(1), accent)
+                setStroke(dp(2), accent)
             } else {
                 setColor(Color.argb(160, 20, 28, 48))
                 setStroke(dp(1), Color.argb(90, 120, 130, 160))
@@ -829,23 +1135,16 @@ class NetworkHubActivity : AppCompatActivity() {
         }
     }
 
-    // ================= NETWORK panel (inline, classic hub controls) =================
+    // ================= NETWORK panel (classic hub controls, glowing style) =================
 
     private fun buildNetworkPanel(): View {
-        val b = BucketUi("network", "NETWORK", "RELAY • PAIR • STATUS", VIOLET,
-            emptyList(), "")
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val accent = VIOLET
+        val card = NeonPanelView(this, accent).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT)
                 .apply { topMargin = dp(14) }
-            background = GradientDrawable().apply {
-                setColor(PANEL)
-                setStroke(dp(2), b.accent)
-                cornerRadius = dp(18).toFloat()
-            }
-            setPadding(dp(14), dp(10), dp(14), dp(12))
+            setPadding(dp(22), dp(20), dp(22), dp(22))
         }
         card.addView(TextView(this).apply {
             text = "NETWORK Workspace"
@@ -854,7 +1153,7 @@ class NetworkHubActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
         })
-        card.addView(centerLabel(b.tagline, 10f, b.accent).apply {
+        card.addView(centerLabel("RELAY • PAIR • STATUS", 10f, accent).apply {
             letterSpacing = 0.2f
             setPadding(0, 0, 0, dp(6))
         })
@@ -965,18 +1264,12 @@ class NetworkHubActivity : AppCompatActivity() {
 
     private fun buildSystemPanel(): View {
         val accent = VIOLET
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val card = NeonPanelView(this, accent).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT)
                 .apply { topMargin = dp(14) }
-            background = GradientDrawable().apply {
-                setColor(PANEL)
-                setStroke(dp(2), accent)
-                cornerRadius = dp(18).toFloat()
-            }
-            setPadding(dp(14), dp(10), dp(14), dp(12))
+            setPadding(dp(22), dp(20), dp(22), dp(22))
         }
         card.addView(TextView(this).apply {
             text = "SYSTEM Workspace"
