@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Motorola flavor only: Jon's chosen hub-orb launcher icon.
+         The main manifest stays icon-free so the phoneB flavor keeps
+         the default system icon. Manifest merger applies these
+         attributes onto the main <application> tag for motorola builds. -->
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round">
+    </application>
+</manifest>
