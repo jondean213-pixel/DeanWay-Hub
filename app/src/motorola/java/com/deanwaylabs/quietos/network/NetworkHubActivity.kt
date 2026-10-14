@@ -1210,7 +1210,8 @@ class NetworkHubActivity : AppCompatActivity() {
                 else -> views += compactEmpty("QUIET keeps it silent.")
             }
             "spam" -> when (tabName) {
-                "Calls" -> views += spamCallViews(limit, detailed, onChanged)
+                "Calls" -> views += spamCallViews(limit, detailed,
+                    onChanged = onChanged)
                 "Block List" -> views += blocklistViews(limit, detailed, onChanged)
                 "Logs" -> addSpam(spamEntries().take(limit))
                 else -> views += compactEmpty(
