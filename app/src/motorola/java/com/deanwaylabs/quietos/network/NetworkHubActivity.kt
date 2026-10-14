@@ -701,13 +701,17 @@ class NetworkHubActivity : AppCompatActivity() {
         // ---- 1. glowing connection lines (behind everything else) ----
         val lv = LinesView(this)
         stageLines = lv
+        // Jon 2026-10-13: satellite nodes on an EVEN orbit ring — equal 72°
+        // spacing around Gemma's medallion center (615, 475), radius 300.
+        // SPAM at the bottom (90°); NOW upper-left, SOON upper-right,
+        // DIGEST left, QUIET right. Lines run Gemma edge -> node center.
         lv.setLines(listOf(
-            Line(498f, 344f, 445f, 283f, GREEN),    // Gemma -> NOW
-            Line(757f, 370f, 872f, 283f, ORANGE),   // Gemma -> SOON
-            Line(495f, 610f, 447f, 663f, BLUE),    // Gemma -> DIGEST
-            Line(759f, 583f, 868f, 663f, PURPLE),  // Gemma -> QUIET
-            Line(590f, 648f, 578f, 795f, RED),     // Gemma -> SPAM SHIELD (left)
-            Line(640f, 648f, 652f, 795f, RED)      // Gemma -> SPAM SHIELD (right)
+            Line(510f, 331f, 439f, 232f, GREEN),    // Gemma -> NOW
+            Line(720f, 331f, 791f, 232f, ORANGE),   // Gemma -> SOON
+            Line(446f, 530f, 330f, 568f, BLUE),     // Gemma -> DIGEST
+            Line(784f, 530f, 900f, 568f, PURPLE),   // Gemma -> QUIET
+            Line(590f, 653f, 590f, 775f, RED),      // Gemma -> SPAM SHIELD (left)
+            Line(640f, 653f, 640f, 775f, RED)       // Gemma -> SPAM SHIELD (right)
         ))
         stage.addView(lv, stage.PParams(0, 0, 1230, 1278))
 
@@ -741,13 +745,16 @@ class NetworkHubActivity : AppCompatActivity() {
             stage.addView(panel, stage.PParams(r[0], r[1], r[2], r[3]))
         }
 
-        // ---- 4. orbit nodes (above panels, like the graphic) ----
+        // ---- 4. orbit nodes: even 72° ring around Gemma (Jon 2026-10-13) ----
+        // centers: now (439,232), soon (791,232), digest (330,568),
+        // quiet (900,568), spam (615,775) — radius 300 from (615,475).
+        // Sizes unchanged; workspace panels untouched.
         val nodeRects = mapOf(
-            "now" to intArrayOf(357, 195, 176, 176),
-            "soon" to intArrayOf(784, 195, 176, 176),
-            "digest" to intArrayOf(365, 581, 164, 164),
-            "quiet" to intArrayOf(786, 581, 164, 164),
-            "spam" to intArrayOf(527, 770, 176, 176)
+            "now" to intArrayOf(351, 144, 176, 176),
+            "soon" to intArrayOf(703, 144, 176, 176),
+            "digest" to intArrayOf(248, 486, 164, 164),
+            "quiet" to intArrayOf(818, 486, 164, 164),
+            "spam" to intArrayOf(527, 687, 176, 176)
         )
         for (b in buckets) {
             val r = nodeRects[b.key] ?: continue
