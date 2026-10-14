@@ -175,6 +175,17 @@ class NetworkHubActivity : AppCompatActivity() {
     private var spamTodayText: TextView? = null
     private var spamTotalText: TextView? = null
     private var spamCallsHost: LinearLayout? = null
+    /** Connection-lines view: drives the electrical-current animation. */
+    private var stageLines: LinesView? = null
+    /**
+     * Runtime-computed stage row heights (dp) per bucket, derived from each
+     * panel's real graphic height and the screen — Jon 2026-10-13: panel
+     * content (esp. the bottom action button) must never overflow the neon
+     * border on any screen size.
+     */
+    private val stageRowH = mutableMapOf<String, Float>()
+    /** Measured host height (dp) for the SPAM SHIELD stage call rows. */
+    private var spamCallHostDp = 0f
 
     /** Live panel refresh: re-reads sources every 5s while resumed. */
     private val refreshHandler = Handler(Looper.getMainLooper())
@@ -381,8 +392,13 @@ class NetworkHubActivity : AppCompatActivity() {
                             val x2: Float, val y2: Float, val color: Int)
 
     /**
-     * Luminous connection lines. Endpoints are declared in GRAPHIC pixels
-     * (1230x1278 space) and scaled to the view in onDraw.
+     * Luminous connection lines with live electrical current. Endpoints are
+     * declared in GRAPHIC pixels (1230x1278 space) and scaled to the view in
+     * onDraw. A single linear animator drives energy pulses racing along each
+     * line from Gemma's medallion out to the workspace node, in that line's
+     * bucket color, with a subtle flicker and a breathing base glow. Cheap —
+     * a few dozen primitives per frame — and paused with the activity, so no
+     * meaningful battery cost. No new permissions, no TTS.
      */
     private inner class LinesView(context: android.content.Context) : View(context) {
         private var lines: List<Line> = emptyList()
@@ -395,7 +411,16 @@ class NetworkHubActivity : AppCompatActivity() {
             strokeCap = Paint.Cap.ROUND
             color = Color.argb(200, 255, 255, 255)
         }
+        private val pulsePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+        }
+        private val pulseCore = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
         private val path = Path()
+        private var phase = 0f
+        private var currentAnim: ValueAnimator? = null
 
         init { setLayerType(LAYER_TYPE_SOFTWARE, null) }
 
@@ -404,8 +429,31 @@ class NetworkHubActivity : AppCompatActivity() {
             invalidate()
         }
 
+        /** Start the current animation (called from onResume). */
+        fun startCurrent() {
+            if (currentAnim?.isRunning == true) return
+            currentAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 1500L
+                repeatCount = ValueAnimator.INFINITE
+                addUpdateListener {
+                    phase = it.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+        }
+
+        /** Stop the current animation (called from onPause) — saves battery. */
+        fun stopCurrent() {
+            currentAnim?.cancel()
+            currentAnim = null
+        }
+
         override fun onDraw(canvas: Canvas) {
             val s = if (width > 0) width / 1230f else 1f
+            // gentle "live wire" breathing on the base glow
+            val breathe = 0.82f + 0.18f *
+                kotlin.math.sin(phase * 2f * kotlin.math.PI.toFloat())
             for (ln in lines) {
                 val x1 = ln.x1 * s
                 val y1 = ln.y1 * s
@@ -417,15 +465,36 @@ class NetworkHubActivity : AppCompatActivity() {
                 val my = (y1 + y2) / 2f
                 // gentle outward bow
                 val bow = if (x2 >= x1) -dpf(18f) else dpf(18f)
-                path.quadTo(mx + bow, my, x2, y2)
+                val cx = mx + bow
+                path.quadTo(cx, my, x2, y2)
                 glowPaint.strokeWidth = dpf(5f)
                 glowPaint.color = ln.color
-                glowPaint.alpha = 210
+                glowPaint.alpha = (210 * breathe).toInt()
                 glowPaint.setShadowLayer(dpf(16f), 0f, 0f, ln.color)
                 canvas.drawPath(path, glowPaint)
                 glowPaint.clearShadowLayer()
                 corePaint.strokeWidth = dpf(1.8f)
                 canvas.drawPath(path, corePaint)
+                // electrical pulses: bright arcs racing Gemma -> node
+                val pulses = 3
+                for (k in 0 until pulses) {
+                    val t = (phase + k.toFloat() / pulses) % 1f
+                    val mt = 1f - t
+                    val px = mt * mt * x1 + 2 * mt * t * cx + t * t * x2
+                    val py = mt * mt * y1 + 2 * mt * t * my + t * t * y2
+                    val flick = 0.7f + 0.3f * kotlin.math.sin(
+                        (phase * 2f + k * 0.37f) * 2f *
+                            kotlin.math.PI.toFloat())
+                    pulsePaint.color = ln.color
+                    pulsePaint.alpha = (235 * flick).toInt()
+                    pulsePaint.strokeWidth = dpf(6.5f)
+                    pulsePaint.setShadowLayer(dpf(13f), 0f, 0f, ln.color)
+                    canvas.drawPoint(px, py, pulsePaint)
+                    pulsePaint.clearShadowLayer()
+                    pulseCore.color = Color.argb((255 * flick).toInt(),
+                        255, 255, 255)
+                    canvas.drawCircle(px, py, dpf(2f), pulseCore)
+                }
             }
         }
     }
@@ -631,6 +700,7 @@ class NetworkHubActivity : AppCompatActivity() {
 
         // ---- 1. glowing connection lines (behind everything else) ----
         val lv = LinesView(this)
+        stageLines = lv
         lv.setLines(listOf(
             Line(498f, 344f, 445f, 283f, GREEN),    // Gemma -> NOW
             Line(757f, 370f, 872f, 283f, ORANGE),   // Gemma -> SOON
@@ -654,16 +724,19 @@ class NetworkHubActivity : AppCompatActivity() {
             stage.PParams(440, 156, 350, 30))
 
         // ---- 3. workspace panels (glassy, glowing, compact) ----
+        // Jon 2026-10-13: panels a little bigger; every child (title, pills,
+        // rows, the solid bottom action button) must sit fully INSIDE the
+        // neon border — the buttons were hanging outside the panel lines.
         val panelRects = mapOf(
-            "now" to intArrayOf(8, 52, 354, 496),
-            "soon" to intArrayOf(868, 52, 354, 496),
-            "digest" to intArrayOf(8, 558, 354, 454),
-            "quiet" to intArrayOf(868, 558, 354, 454),
-            "spam" to intArrayOf(378, 948, 474, 284)
+            "now" to intArrayOf(8, 40, 354, 546),
+            "soon" to intArrayOf(868, 40, 354, 546),
+            "digest" to intArrayOf(8, 598, 354, 499),
+            "quiet" to intArrayOf(868, 598, 354, 499),
+            "spam" to intArrayOf(378, 926, 474, 324)
         )
         for (b in buckets) {
             val r = panelRects[b.key] ?: continue
-            val panel = buildStagePanel(b)
+            val panel = buildStagePanel(b, r[3])
             stagePanels[b.key] = panel
             stage.addView(panel, stage.PParams(r[0], r[1], r[2], r[3]))
         }
@@ -691,24 +764,24 @@ class NetworkHubActivity : AppCompatActivity() {
         // ---- 6. footer ----
         stage.addView(TextView(this).apply {
             text = "D"
-            textSize = 40f
+            textSize = 32f
             setTextColor(VIOLET)
             typeface = gemmaScript
             gravity = Gravity.CENTER
-        }, stage.PParams(105, 1025, 130, 120))
+        }, stage.PParams(105, 1105, 130, 85))
         stage.addView(stageText("DEANWAY LABS", 8f, TEXT, bold = true, ls = 0.15f),
-            stage.PParams(70, 1148, 250, 28))
+            stage.PParams(70, 1195, 250, 26))
         stage.addView(stageText("BUILDING A QUIETER TOMORROW", 6f, DIM, ls = 0.1f),
-            stage.PParams(35, 1178, 320, 24))
+            stage.PParams(35, 1223, 320, 22))
         stage.addView(stageText("DeanWay LLC | Evansville, IN", 6f, DIM),
-            stage.PParams(10, 1242, 320, 24))
+            stage.PParams(10, 1248, 310, 22))
         stage.addView(TextView(this).apply {
             text = "LESS NOISE\nMORE LIFE\nYOU'RE IN CONTROL"
             textSize = 7f
             setTextColor(DIM)
             gravity = Gravity.CENTER
             setLineSpacing(0f, 1.15f)
-        }, stage.PParams(945, 1080, 270, 95))
+        }, stage.PParams(945, 1140, 270, 95))
         stage.addView(stageText("QuietOS Alpha 0.1", 6f, DIM),
             stage.PParams(1000, 1242, 215, 22))
 
@@ -845,26 +918,46 @@ class NetworkHubActivity : AppCompatActivity() {
      * pills) with compact content: title, 3 tab pills, up to 2 data rows,
      * 1 action button. SPAM SHIELD shows live stats + button (its rect is
      * too short for rows at legible sizes).
+     *
+     * SELF-FITTING (Jon 2026-10-13): the panel's real dp height is derived
+     * from its graphic rect and the screen; the chrome (title/tabs/button)
+     * uses fixed compact heights and the list host takes the rest via
+     * weight. The solid bottom action button is the last child, so it always
+     * lands INSIDE the neon border — never hanging outside the panel lines,
+     * on any screen size or density.
      */
-    private fun buildStagePanel(b: BucketUi): NeonPanelView {
+    private fun buildStagePanel(b: BucketUi, panelGh: Int): NeonPanelView {
         val card = NeonPanelView(this, b.accent)
-        card.setPadding(dp(7), dp(6), dp(7), dp(7))
+        // Content padding exceeds the neon border's 11dp draw inset, so every
+        // child sits fully inside the border lines.
+        val padSide = 10; val padTop = 9; val padBot = 12
+        card.setPadding(dp(padSide), dp(padTop), dp(padSide), dp(padBot))
+
+        val dm = resources.displayMetrics
+        val panelDpH = panelGh * (dm.widthPixels / 1230f) / dm.density
+        val titleDp = 19f; val tabsDp = 24f; val btnDp = 34f
+        val chromeDp = padTop + padBot + titleDp + tabsDp + btnDp
+        // list host gets the rest; rows split it evenly, floored for legibility
+        val rowHdp = ((panelDpH - chromeDp - 4f) / STAGE_ROWS).coerceAtLeast(22f)
+        stageRowH[b.key] = rowHdp
 
         // title bar: ‹ TITLE Workspace        icon
         val titleRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(titleDp.toInt()))
         }
         titleRow.addView(TextView(this).apply {
             text = "‹"
-            textSize = 13f
+            textSize = 11f
             setTextColor(b.accent)
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 0, dp(3), 0)
         })
         titleRow.addView(TextView(this).apply {
             text = "${b.title} Workspace"
-            textSize = 11f
+            textSize = 9.5f
             setTextColor(TEXT)
             typeface = Typeface.DEFAULT_BOLD
             setSingleLine()
@@ -874,27 +967,37 @@ class NetworkHubActivity : AppCompatActivity() {
         })
         titleRow.addView(TextView(this).apply {
             text = bucketIcons[b.key] ?: "◉"
-            textSize = 12f
+            textSize = 10f
             setTextColor(b.accent)
             gravity = Gravity.CENTER
         })
         card.addView(titleRow)
 
         if (b.key == "spam") {
-            // stats + recent screened calls (with Block buttons) + action
+            // stats + recent screened calls (with Block buttons) + action.
+            // The spam rect is short: stats and the button always fit; the
+            // call rows get whatever the host measures (2, 1, or 0 rows —
+            // never overflowing the border).
+            val statsDp = 26f
             val stats = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
-                setPadding(0, dp(4), 0, dp(2))
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(statsDp.toInt()))
             }
-            stats.addView(compactStat("Blocked\nToday", "0") { spamTodayText = it })
-            stats.addView(compactStat("Total\nBlocked", "0") { spamTotalText = it })
+            stats.addView(compactStat("Blocked\nToday", "0", 7f, 12f) { spamTodayText = it })
+            stats.addView(compactStat("Total\nBlocked", "0", 7f, 12f) { spamTotalText = it })
             card.addView(stats)
             val callsHost = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
             }
             spamCallsHost = callsHost
             card.addView(callsHost)
+            val spamChrome = padTop + padBot + titleDp + statsDp + btnDp
+            spamCallHostDp = (panelDpH - spamChrome - 4f).coerceAtLeast(0f)
             refreshSpamStage()
         } else {
             // tabs (first 3, like the graphic's pill row)
@@ -902,17 +1005,22 @@ class NetworkHubActivity : AppCompatActivity() {
             val defaultIdx = tabs.indexOf(b.defaultTab).takeIf { it >= 0 } ?: 0
             val tabScroll = HorizontalScrollView(this).apply {
                 isHorizontalScrollBarEnabled = false
-                setPadding(0, dp(5), 0, dp(5))
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(tabsDp.toInt()))
             }
             val tabRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.MATCH_PARENT)
             }
             val pills = mutableListOf<TextView>()
             tabs.forEachIndexed { i, name ->
                 val pill = TextView(this).apply {
                     text = name
-                    textSize = 10f
-                    setPadding(dp(9), dp(4), dp(9), dp(4))
+                    textSize = 9f
+                    setPadding(dp(8), dp(2), dp(8), dp(2))
                     setSingleLine()
                     isClickable = true
                     isFocusable = true
@@ -934,9 +1042,13 @@ class NetworkHubActivity : AppCompatActivity() {
             tabScroll.addView(tabRow)
             card.addView(tabScroll)
 
-            // list area — capped at STAGE_ROWS; the PAGE scrolls, not the panel
+            // list area — weight 1 takes the remaining space (rows are sized
+            // to fit it exactly); the PAGE scrolls, not the panel
             val host = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
             }
             stageHosts[b.key] = host
             stageTabs[b.key] = defaultIdx
@@ -944,12 +1056,14 @@ class NetworkHubActivity : AppCompatActivity() {
             refreshStageBucket(b)
         }
 
-        // bottom action
+        // bottom action — fixed height and the last child, so it always
+        // sits INSIDE the panel border, pinned near the panel's bottom
         val action = Button(this).apply {
             text = b.actionLabel
-            textSize = 11f
+            textSize = 10f
             setTextColor(TEXT)
             isAllCaps = false
+            minimumHeight = 0
             background = GradientDrawable().apply {
                 setColor(Color.argb(110,
                     Color.red(b.accent), Color.green(b.accent), Color.blue(b.accent)))
@@ -958,8 +1072,8 @@ class NetworkHubActivity : AppCompatActivity() {
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { topMargin = dp(6) }
+                dp(btnDp.toInt()))
+                .apply { topMargin = dp(4) }
             setOnClickListener { onBucketAction(b) }
         }
         card.addView(action)
@@ -973,6 +1087,7 @@ class NetworkHubActivity : AppCompatActivity() {
     }
 
     private fun compactStat(label: String, value: String,
+                            labelSp: Float = 8f, valueSp: Float = 15f,
                             onValue: (TextView) -> Unit = {}): LinearLayout =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -981,13 +1096,13 @@ class NetworkHubActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             addView(TextView(this@NetworkHubActivity).apply {
                 text = label
-                textSize = 8f
+                textSize = labelSp
                 setTextColor(DIM)
                 gravity = Gravity.CENTER
             })
             addView(TextView(this@NetworkHubActivity).apply {
                 text = value
-                textSize = 15f
+                textSize = valueSp
                 setTextColor(TEXT)
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
@@ -995,24 +1110,30 @@ class NetworkHubActivity : AppCompatActivity() {
             })
         }
 
-    /** Compact data row: real title, single line, chevron. */
-    private fun stageRow(title: String, accent: Int): View {
+    /**
+     * Compact data row: real title, single line, chevron. On the stage the
+     * row gets a fixed height (derived from the panel's measured space) so
+     * rows can never push the action button outside the panel border.
+     */
+    private fun stageRow(title: String, accent: Int,
+                         fixedHdp: Float = 0f): View {
+        val h = if (fixedHdp > 0) dp(fixedHdp.toInt())
+        else LinearLayout.LayoutParams.WRAP_CONTENT
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), dp(4), dp(4), dp(4))
+            setPadding(dp(6), dp(2), dp(4), dp(2))
             background = GradientDrawable().apply {
                 setColor(Color.argb(120, 20, 28, 50))
                 cornerRadius = dp(8).toFloat()
             }
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-                .apply { bottomMargin = dp(4) }
+                LinearLayout.LayoutParams.MATCH_PARENT, h)
+                .apply { bottomMargin = dp(3) }
         }
         row.addView(TextView(this).apply {
             text = title
-            textSize = 11f
+            textSize = 9.5f
             setTextColor(TEXT)
             setSingleLine()
             ellipsize = TextUtils.TruncateAt.END
@@ -1021,7 +1142,7 @@ class NetworkHubActivity : AppCompatActivity() {
         })
         row.addView(TextView(this).apply {
             text = "›"
-            textSize = 16f
+            textSize = 12f
             setTextColor(accent)
             setPadding(dp(2), 0, dp(2), 0)
         })
@@ -1069,14 +1190,14 @@ class NetworkHubActivity : AppCompatActivity() {
             if (items.isEmpty()) views += compactEmpty()
             else items.forEach {
                 views += if (detailed) detailRow(it.title, it.sub, b.accent)
-                else stageRow(it.title, b.accent)
+                else stageRow(it.title, b.accent, stageRowH[b.key] ?: 0f)
             }
         }
         fun addSpam(items: List<SpamEntry>) {
             if (items.isEmpty()) views += compactEmpty("Nothing blocked yet.")
             else items.forEach {
                 views += if (detailed) detailRow(it.title, it.sub, b.accent)
-                else stageRow(it.title, b.accent)
+                else stageRow(it.title, b.accent, stageRowH[b.key] ?: 0f)
             }
         }
         when (b.key) {
@@ -1134,11 +1255,25 @@ class NetworkHubActivity : AppCompatActivity() {
     private fun refreshSpamStage() {
         val entries = spamEntries()
         spamTodayText?.text = entries.count { it.timeMs >= startOfToday() }.toString()
-        spamTotalText?.text = entries.size.toString()
+        // Total Blocked counts screened calls AND Jon's manual blocklist —
+        // Jon 2026-10-13: it read 0 with a number blocked.
+        val blockedCount = BlocklistStore(this).all().size
+        spamTotalText?.text = (entries.size + blockedCount).toString()
         val host = spamCallsHost ?: return
         host.removeAllViews()
-        spamCallViews(limit = 2, detailed = false) { refreshSpamStage() }
-            .forEach { host.addView(it) }
+        // Fit the call rows into the measured host: 2 rows when they fit,
+        // else 1, else stats+button only — never overflowing the border.
+        val minRowDp = 28f
+        val show = when {
+            spamCallHostDp >= minRowDp * 2 -> 2
+            spamCallHostDp >= minRowDp -> 1
+            else -> 0
+        }
+        if (show > 0) {
+            spamCallViews(limit = show, detailed = false,
+                rowHdp = spamCallHostDp / show) { refreshSpamStage() }
+                .forEach { host.addView(it) }
+        }
     }
 
     /**
@@ -1146,31 +1281,40 @@ class NetworkHubActivity : AppCompatActivity() {
      * compact stage panel and the full-screen expanded view.
      */
     private fun spamCallViews(limit: Int, detailed: Boolean,
+                              rowHdp: Float = 0f,
                               onChanged: () -> Unit): List<View> {
         val accent = buckets.first { it.key == "spam" }.accent
         val store = BlocklistStore(this)
         val calls = screenedCalls().take(limit)
         if (calls.isEmpty()) return listOf(compactEmpty("No screened calls yet."))
-        return calls.map { call -> spamCallRow(call, accent, detailed, store, onChanged) }
+        return calls.map { call ->
+            spamCallRow(call, accent, detailed, store, rowHdp, onChanged)
+        }
     }
 
     private fun spamCallRow(call: ScreenedCall, accent: Int, detailed: Boolean,
-                            store: BlocklistStore, onChanged: () -> Unit): View {
+                            store: BlocklistStore, rowHdp: Float = 0f,
+                            onChanged: () -> Unit): View {
         val blocked = store.isBlocked(call.number)
         // Old log entries stored masked numbers ("***1234") — show them, but no Block button.
         val canBlock = !call.number.startsWith("***") &&
             BlocklistStore.normalize(call.number).isNotEmpty()
+        // Fixed height on the stage: the row can never push the action
+        // button outside the panel border.
+        val fixed = rowHdp > 0f
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), dp(4), dp(6), dp(4))
+            setPadding(dp(6), dp(if (fixed) 2 else 4), dp(6), dp(if (fixed) 2 else 4))
             background = GradientDrawable().apply {
                 setColor(Color.argb(120, 20, 28, 50))
                 cornerRadius = dp(8).toFloat()
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) }
+                if (fixed) dp(rowHdp.toInt())
+                else LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { bottomMargin = dp(if (fixed) 2 else 4) }
         }
         val textBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1180,7 +1324,7 @@ class NetworkHubActivity : AppCompatActivity() {
         textBox.addView(TextView(this).apply {
             text = (if (blocked) "🚫 " else "") +
                 call.number.ifBlank { "Hidden caller" }
-            textSize = if (detailed) 14f else 11f
+            textSize = if (detailed) 14f else if (fixed) 10f else 11f
             setTextColor(TEXT)
             typeface = Typeface.DEFAULT_BOLD
             setSingleLine()
@@ -1190,7 +1334,7 @@ class NetworkHubActivity : AppCompatActivity() {
             .filter { it.isNotBlank() }.joinToString("  •  ")
         textBox.addView(TextView(this).apply {
             text = sub
-            textSize = if (detailed) 12f else 9f
+            textSize = if (detailed) 12f else if (fixed) 8.5f else 9f
             setTextColor(DIM)
             setSingleLine()
             ellipsize = TextUtils.TruncateAt.END
@@ -1199,11 +1343,13 @@ class NetworkHubActivity : AppCompatActivity() {
         if (canBlock) {
             row.addView(Button(this).apply {
                 text = if (blocked) "Unblock" else "Block"
-                textSize = if (detailed) 12f else 10f
+                textSize = if (detailed) 12f else if (fixed) 9f else 10f
                 setTextColor(TEXT)
                 isAllCaps = false
                 minimumWidth = 0
-                setPadding(dp(10), dp(2), dp(10), dp(2))
+                if (fixed) minimumHeight = 0
+                setPadding(dp(8), dp(if (fixed) 1 else 2),
+                    dp(8), dp(if (fixed) 1 else 2))
                 background = GradientDrawable().apply {
                     setColor(Color.argb(if (blocked) 150 else 90,
                         Color.red(accent), Color.green(accent), Color.blue(accent)))
@@ -1363,7 +1509,7 @@ class NetworkHubActivity : AppCompatActivity() {
                 statsRow.addView(compactStat("Blocked\nToday",
                     entries.count { it.timeMs >= startOfToday() }.toString()))
                 statsRow.addView(compactStat("Total\nBlocked",
-                    entries.size.toString()))
+                    (entries.size + BlocklistStore(this).all().size).toString()))
                 listHost.addView(statsRow)
             }
             bucketListViews(b, tabName, 50, detailed = true) { renderList() }
@@ -2472,6 +2618,7 @@ class NetworkHubActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        stageLines?.startCurrent()
         refreshStatus()
         refreshAllStageBuckets()
         refreshHandler.removeCallbacks(refreshRunnable)
@@ -2479,6 +2626,7 @@ class NetworkHubActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
+        stageLines?.stopCurrent()
         refreshHandler.removeCallbacks(refreshRunnable)
         super.onPause()
     }
