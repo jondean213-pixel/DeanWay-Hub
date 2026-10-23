@@ -651,6 +651,10 @@ class NetworkHubActivity : AppCompatActivity() {
             isClickable = true
             isFocusable = true
             setOnClickListener { scrollToNetwork() }
+            // Backup door: long-press opens Card Alerts Setup directly.
+            // Setup for a safety-critical feature must never depend on a
+            // single panel rendering (field report 2026-10-23).
+            setOnLongClickListener { showCardSetup(); true }
         }
         col.addView(statusStrip)
 
@@ -2725,6 +2729,30 @@ class NetworkHubActivity : AppCompatActivity() {
         }
         card.addView(interceptionButton)
         refreshAttentionStatus()
+
+        // ---- device & decision cards (second door) ----
+        // Pair/Setup and Card Alerts Setup live primarily in the NETWORK
+        // panel, but a safety-critical setup must not hang on one button in
+        // one panel (field report 2026-10-23: NETWORK panel unreachable on
+        // Jon's phone after pairing; root cause still open). These buttons
+        // open the exact same dialogs from the SYSTEM panel.
+        card.addView(sectionLabel("Device & Cards"))
+        card.addView(Button(this).apply {
+            text = "Pair / Setup"
+            setOnClickListener { showPairing() }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { bottomMargin = dp(6) }
+        })
+        card.addView(Button(this).apply {
+            text = "Card alerts setup"
+            setOnClickListener { showCardSetup() }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { bottomMargin = dp(6) }
+        })
         return card
     }
 
