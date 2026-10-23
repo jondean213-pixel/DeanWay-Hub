@@ -19,7 +19,7 @@
         </intent>
     </queries>
 
-    <application android:allowBackup="false" android:label="QuietOS" android:theme="@style/Theme.QuietOS">
+    <application android:allowBackup="false" android:label="DeanWay Hub" android:theme="@style/Theme.QuietOS">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
@@ -30,7 +30,7 @@
         <activity
             android:name=".network.NetworkHubActivity"
             android:exported="false"
-            android:label="QuietOS Network Hub"/>
+            android:label="DeanWay Hub"/>
 
         <activity
             android:name=".messages.MessagesActivity"

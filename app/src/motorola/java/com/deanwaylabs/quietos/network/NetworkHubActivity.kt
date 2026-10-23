@@ -742,7 +742,7 @@ class NetworkHubActivity : AppCompatActivity() {
             stage.PParams(10, 6, 190, 30))
         stage.addView(stageText("Your Phone. Your Rules.", 7f, HDR_LAV),
             stage.PParams(900, 6, 320, 30))
-        stage.addView(stageText("QuietOS", 18f, TEXT, bold = true),
+        stage.addView(stageText("DeanWay Hub", 18f, TEXT, bold = true),
             stage.PParams(485, 36, 260, 92))
         stage.addView(stageText("BY DEANWAY LABS", 7f, DIM, ls = 0.1f),
             stage.PParams(500, 128, 230, 28))
