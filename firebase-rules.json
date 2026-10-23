@@ -1,5 +1,42 @@
 {
   "rules": {
+    // ------------------------------------------------------------------
+    // quietos-cards — app card route (APP-CARD-ROUTE-DESIGN §3.3).
+    // ADDED 2026-10-23; the quietos-relay block below is untouched.
+    // Same posture as the relay: anonymous auth is the gate; the real
+    // security is end-to-end. Card bodies are AES-256-GCM ciphertext
+    // to the phone's Keystore P-256 key; decisions are ECDSA-signed
+    // and verified host-side against the key Jon pinned in the
+    // pairing ceremony. Firebase never sees plaintext or a private
+    // key, and a rule here is never a security boundary — validates
+    // only keep the tree well-formed.
+    // ------------------------------------------------------------------
+    "quietos-cards": {
+      "$device": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "cards": {
+          "$card": {
+            ".validate": "newData.hasChildren(['v', 'kind', 'created_at', 'expires_at', 'actions', 'title', 'body_enc', 'state'])",
+            "decision": {
+              "$other": { ".validate": false },
+              ".validate": "newData.hasChildren(['verb', 'decided_at', 'sig'])",
+              "verb": { ".validate": "newData.isString() && (newData.val() == 'approve' || newData.val() == 'deny')" },
+              "decided_at": { ".validate": "newData.isNumber()" },
+              "sig": { ".validate": "newData.isString() && newData.val().length <= 256" }
+            }
+          }
+        },
+        "identity": {
+          "$other": { ".validate": false },
+          "pubkey": { ".validate": "newData.isString() && newData.val().length <= 4096" },
+          "fingerprint": { ".validate": "newData.isString() && newData.val().matches(/^[0-9a-f]{64}$/)" },
+          "confirm": { ".validate": "newData.isString() && newData.val().length <= 128" },
+          "fcm_token": { ".validate": "newData.isString() && newData.val().length <= 512" },
+          "updated_at": { ".validate": "newData.isNumber()" }
+        }
+      }
+    },
     "quietos-relay": {
       "$deviceId": {
         // A phone can read its OWN inbox only.

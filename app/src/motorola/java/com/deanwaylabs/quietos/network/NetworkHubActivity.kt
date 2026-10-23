@@ -57,6 +57,12 @@ import com.deanwaylabs.quietos.attention.AttentionRepository
 import com.deanwaylabs.quietos.calls.BlocklistStore
 import com.deanwaylabs.quietos.calls.CallScreeningLog
 import com.deanwaylabs.quietos.calls.ScreenedCall
+import com.deanwaylabs.quietos.network.cards.CardIdentity
+import com.deanwaylabs.quietos.network.cards.CardNotification
+import com.deanwaylabs.quietos.network.cards.CardRecord
+import com.deanwaylabs.quietos.network.cards.CardRelay
+import com.deanwaylabs.quietos.network.cards.CardStore
+import com.deanwaylabs.quietos.network.cards.CardSweepWorker
 import com.deanwaylabs.quietos.voice.GemmaCommandRouter
 import com.deanwaylabs.quietos.voice.VoiceIntent
 import com.deanwaylabs.quietos.messages.MessageSpamLog
@@ -170,6 +176,10 @@ class NetworkHubActivity : AppCompatActivity() {
     private var networkPanelView: View? = null
     private val stagePanels = mutableMapOf<String, NeonPanelView>()
     private val stageNodes = mutableMapOf<String, View>()
+    /** NOW-node badge for pending decision cards (app card route). */
+    private var nowCardBadge: TextView? = null
+    private val GOLD = Color.rgb(0xC9, 0xA2, 0x27)   // DeanWay Labs gold
+    private val cardStore by lazy { CardStore(this) }
     private val stageHosts = mutableMapOf<String, LinearLayout>()
     private val stageTabs = mutableMapOf<String, Int>()
     private var spamTodayText: TextView? = null
@@ -569,7 +579,19 @@ class NetworkHubActivity : AppCompatActivity() {
         setContentView(buildUi())
         wireCallbacks()
         refreshStatus()
+        // App card route: 15-min backstop sweep + live card listener
+        // + identity refresh. All fail-soft (offline just means the
+        // next layer retries).
+        CardSweepWorker.schedule(this)
+        lifecycleScope.launch { CardRelay.start(this@NetworkHubActivity) }
         lifecycleScope.launch { autoLoadExistingModel() }
+        openCardFromIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openCardFromIntent(intent)
     }
 
     // ================= page: GraphicStage + phone controls =================
@@ -876,8 +898,28 @@ class NetworkHubActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             setPadding(0, dp(1), 0, 0)
         })
+        if (b.key == "now") {
+            // Decision-card badge (gold dot + count). Empty when no
+            // card is waiting — the graphic stays untouched then.
+            nowCardBadge = TextView(this).apply {
+                text = ""
+                textSize = 7f
+                setTextColor(GOLD)
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setPadding(0, dp(1), 0, 0)
+            }
+            stack.addView(nowCardBadge)
+        }
         node.addView(stack)
         return node
+    }
+
+    /** NOW-node badge: pending decision cards, or nothing. */
+    private fun updateCardBadge() {
+        val badge = nowCardBadge ?: return
+        val n = try { cardStore.pending().size } catch (e: Exception) { 0 }
+        badge.text = if (n > 0) "● $n WAITING" else ""
     }
 
     /** Node tap: unmistakable — pulse, smooth-scroll its panel to center, border flash. */
@@ -1208,7 +1250,15 @@ class NetworkHubActivity : AppCompatActivity() {
             }
         }
         when (b.key) {
-            "now" -> addItems(filterItems(nowItems(), bucketTabKeys(b, tabName)).take(limit))
+            "now" -> {
+                // Decision cards ride ABOVE the items in the expanded
+                // NOW view (design §6.3) — unfiltered by tab, not
+                // counted against the item limit. Compact stage panel
+                // keeps its fixed graphic height; the gold badge on
+                // the NOW node is its signal there.
+                if (detailed) views += cardStackViews(onChanged)
+                addItems(filterItems(nowItems(), bucketTabKeys(b, tabName)).take(limit))
+            }
             "soon" -> views += compactEmpty("Nothing scheduled yet.")
             "digest" -> addItems(filterItems(digestItems(), bucketTabKeys(b, tabName)).take(limit))
             "quiet" -> when (tabName) {
@@ -1444,6 +1494,7 @@ class NetworkHubActivity : AppCompatActivity() {
             else refreshStageBucket(b)
         }
         refreshAttentionStatus()
+        updateCardBadge()
     }
 
     private fun compactEmpty(text: String = "Nothing here yet."): View =
@@ -1582,6 +1633,350 @@ class NetworkHubActivity : AppCompatActivity() {
             LinearLayout.LayoutParams.MATCH_PARENT)
         dialog.window?.setBackgroundDrawable(
             ColorDrawable(Color.rgb(0x05, 0x05, 0x10)))
+        dialog.show()
+    }
+
+    // ================= decision cards (app card route) =================
+    // APP-CARD-ROUTE-DESIGN §6.3/§6.4: pending cards stack at the top
+    // of the expanded NOW workspace; the card view shows the decrypted
+    // body VERBATIM with kind-true decision buttons. Governor colors:
+    // DeanWay navy + gold, whatever bucket they ride in.
+
+    private fun cardStackViews(onChanged: () -> Unit): List<View> {
+        val views = mutableListOf<View>()
+        val pending = try {
+            cardStore.snapshotWithBodies().filter { it.isPending }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        if (pending.isEmpty()) return views
+        views += centerLabel("⏳ WAITING ON YOUR CALL", 12f, GOLD, bold = true)
+            .apply { setPadding(0, dp(2), 0, dp(6)) }
+        for (card in pending) {
+            val mins = ((card.expiresAtSec - CardRelay.nowSec()) / 60)
+                .coerceAtLeast(0)
+            val sub = when {
+                card.body == null -> "Couldn't decrypt this card — open setup."
+                card.kind == "sentinel_hold" ->
+                    "Sentinel hold • decides in ${mins}m if untouched"
+                else -> "Governor approval • decides in ${mins}m if untouched"
+            }
+            val row = detailRow(card.title, sub, GOLD)
+            row.isClickable = true
+            row.isFocusable = true
+            row.setOnClickListener { showCardDialog(card) { onChanged() } }
+            views += row
+        }
+        return views
+    }
+
+    /** The verbatim card view: exactly what Sentinel held, or exactly
+     *  what the governor wants to do. Nothing summarized, ever. */
+    private fun showCardDialog(card: CardRecord, onDecided: () -> Unit = {}) {
+        val full = cardStore.withBody(card)
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(0x0B, 0x1F, 0x3A))
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+        }
+        val panel = NeonPanelView(this, GOLD).apply {
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT)
+        }
+        panel.addView(TextView(this).apply {
+            text = full.title
+            textSize = 19f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(2))
+        })
+        val mins = ((full.expiresAtSec - CardRelay.nowSec()) / 60)
+            .coerceAtLeast(0)
+        val meta = buildString {
+            append(
+                if (full.kind == "sentinel_hold") "SENTINEL HOLD"
+                else "GOVERNOR APPROVAL")
+            full.body?.source?.let { append(" • ").append(it) }
+            append(" • expires in ${mins}m — no answer = it dies")
+            if (full.body?.truncated == true) {
+                append("\n(long content truncated on the card — " +
+                    "full record stays in the host ledger)")
+            }
+        }
+        panel.addView(centerLabel(meta, 11f, GOLD).apply {
+            setPadding(0, 0, 0, dp(10))
+        })
+        val textScroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            addView(TextView(this@NetworkHubActivity).apply {
+                text = full.body?.text
+                    ?: "This card's body could not be decrypted on " +
+                       "this phone. It cannot be decided here — it " +
+                       "will expire untouched, which is the safe " +
+                       "outcome. (Check card setup: the key may have " +
+                       "been re-paired.)"
+                textSize = 14f
+                setTextColor(TEXT)
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+            })
+        }
+        panel.addView(textScroll)
+
+        if (full.isPending && full.body != null) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(10), 0, 0)
+            }
+            val labels = CardNotification.actionLabels(full.kind)
+            labels.forEachIndexed { i, (label, verb) ->
+                val isPrimary = verb == "approve"
+                row.addView(Button(this).apply {
+                    text = label.uppercase()
+                    textSize = 15f
+                    setTextColor(
+                        if (isPrimary) Color.rgb(0x0B, 0x1F, 0x3A) else TEXT)
+                    background = GradientDrawable().apply {
+                        setColor(
+                            if (isPrimary) GOLD
+                            else Color.argb(110, 201, 162, 39))
+                        setStroke(dp(1), GOLD)
+                        cornerRadius = dp(10).toFloat()
+                    }
+                    layoutParams = LinearLayout.LayoutParams(
+                        0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                        .apply { if (i == 0) marginEnd = dp(8) }
+                    setOnClickListener {
+                        // One tap, one decision: disable the row
+                        // before the signed write leaves the phone.
+                        row.isEnabled = false
+                        for (k in 0 until row.childCount) {
+                            row.getChildAt(k).isEnabled = false
+                        }
+                        lifecycleScope.launch {
+                            val ok = CardRelay.decide(
+                                this@NetworkHubActivity, full.id, verb)
+                            toast(
+                                if (ok) "Decision sent: $label."
+                                else "That card already settled — " +
+                                    "nothing sent.")
+                            dialog.dismiss()
+                            updateCardBadge()
+                            refreshAllStageBuckets()
+                            onDecided()
+                        }
+                    }
+                })
+            }
+            panel.addView(row)
+        }
+        panel.addView(Button(this).apply {
+            text = "BACK"
+            textSize = 13f
+            setTextColor(TEXT)
+            background = GradientDrawable().apply {
+                setColor(Color.argb(90, 201, 162, 39))
+                setStroke(dp(1), GOLD)
+                cornerRadius = dp(10).toFloat()
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+                .apply { topMargin = dp(8) }
+            setOnClickListener { dialog.dismiss() }
+        })
+        root.addView(panel)
+        dialog.setContentView(root)
+        dialog.window?.setLayout(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.MATCH_PARENT)
+        dialog.window?.setBackgroundDrawable(
+            ColorDrawable(Color.rgb(0x0B, 0x1F, 0x3A)))
+        dialog.show()
+    }
+
+    /** Deep link from a card notification: open that card, if it is
+     *  still waiting. Anything else (settled/unknown) just lands on
+     *  the hub — the NOW stack shows the current truth. */
+    private fun openCardFromIntent(intent: Intent?) {
+        val cardId = intent?.getStringExtra(CardNotification.EXTRA_CARD_ID)
+            ?: return
+        val record = try { cardStore.get(cardId) } catch (e: Exception) { null }
+        if (record != null && record.isPending) {
+            showCardDialog(cardStore.withBody(record))
+        }
+    }
+
+    /**
+     * Card pairing/setup — design §5.1 + §6.5. Shows this phone's key
+     * fingerprint for the eyeball-compare, the Confirm tap that arms
+     * host-side pinning, and the three delivery checks (notifications,
+     * FCM token, battery). Re-publishing identity happens here and on
+     * hub start; the host confirms nothing until Confirm is tapped.
+     */
+    private fun showCardSetup() {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(0x0B, 0x1F, 0x3A))
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+        }
+        val panel = NeonPanelView(this, GOLD).apply {
+            setPadding(dp(16), dp(14), dp(16), dp(16))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT)
+        }
+        panel.addView(TextView(this).apply {
+            text = "Card Alerts Setup"
+            textSize = 19f
+            setTextColor(TEXT)
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        })
+        panel.addView(centerLabel("DEANWAY LABS • QUIETOS DECISION CARDS",
+            10f, GOLD).apply {
+            letterSpacing = 0.15f
+            setPadding(0, 0, 0, dp(10))
+        })
+
+        val fingerprint = try {
+            com.deanwaylabs.quietos.network.cards.CardCrypto.fingerprint()
+        } catch (e: Exception) {
+            "(key unavailable: ${e.message})"
+        }
+        val deviceId = CardIdentity.deviceId(this) ?: "(pair this device first)"
+        val confirmed = try {
+            CardIdentity.isConfirmed(this)
+        } catch (e: Exception) {
+            false
+        }
+        val notifOn = NotificationManagerCompat.from(this)
+            .areNotificationsEnabled()
+        val batteryMgr = getSystemService(
+            android.os.PowerManager::class.java)
+        val batteryExempt = batteryMgr
+            ?.isIgnoringBatteryOptimizations(packageName) ?: false
+
+        val info = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+            addView(TextView(this@NetworkHubActivity).apply {
+                textSize = 13.5f
+                setTextColor(TEXT)
+                text = buildString {
+                    append("This phone's card key fingerprint:\n")
+                    append(fingerprint.chunked(16).joinToString("\n"))
+                    append("\n\nDevice id (the host needs this as " +
+                        "QUIETOS_CARD_DEVICE_ID):\n")
+                    append(deviceId)
+                    append("\n\nPairing: ")
+                    append(
+                        if (confirmed) {
+                            "CONFIRMED on this phone. The host pins " +
+                                "this key after it sees the confirmation."
+                        } else {
+                            "NOT confirmed yet. Compare the " +
+                                "fingerprint above with the one in the " +
+                                "host's log, character for character. " +
+                                "If they match, tap Confirm — until " +
+                                "then, no cards flow."
+                        })
+                    append("\n\nNotifications: ")
+                    append(if (notifOn) "allowed — decision cards can ding."
+                    else "BLOCKED — cards still appear in NOW, but silent.")
+                    append("\nBattery: ")
+                    append(
+                        if (batteryExempt) {
+                            "this app is exempt — the doorbell can " +
+                                "wake it."
+                        } else {
+                            "Android may put this app to sleep, " +
+                                "which can mute the ding. The card " +
+                                "itself is never lost (it waits in NOW " +
+                                "until it expires)."
+                        })
+                }
+                setPadding(dp(6), dp(4), dp(6), dp(4))
+            })
+        }
+        panel.addView(info)
+
+        fun setupButton(label: String, action: () -> Unit): Button =
+            Button(this).apply {
+                text = label
+                textSize = 14f
+                setTextColor(TEXT)
+                background = GradientDrawable().apply {
+                    setColor(Color.argb(110, 201, 162, 39))
+                    setStroke(dp(1), GOLD)
+                    cornerRadius = dp(10).toFloat()
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT)
+                    .apply { topMargin = dp(8) }
+                setOnClickListener { action() }
+            }
+
+        if (!confirmed) {
+            panel.addView(setupButton("CONFIRM THIS KEY") {
+                CardIdentity.confirmHere(this)
+                lifecycleScope.launch {
+                    CardIdentity.publishIdentity(this@NetworkHubActivity)
+                }
+                dialog.dismiss()
+                showCardSetup()
+                toast("Key confirmed here. The host pins it on its " +
+                    "next cycle.")
+            })
+        }
+        panel.addView(setupButton("RE-SEND KEY TO HOST") {
+            lifecycleScope.launch {
+                val ok = CardIdentity.publishIdentity(
+                    this@NetworkHubActivity)
+                toast(if (ok) "Key re-sent."
+                else "Couldn't reach the cloud — try again on Wi-Fi.")
+            }
+        })
+        if (!notifOn) {
+            panel.addView(setupButton("ALLOW NOTIFICATIONS") {
+                if (android.os.Build.VERSION.SDK_INT >=
+                    android.os.Build.VERSION_CODES.TIRAMISU) {
+                    requestPermissions(
+                        arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                        7101)
+                }
+            })
+        }
+        if (!batteryExempt) {
+            panel.addView(setupButton("DON'T PUT THIS APP TO SLEEP") {
+                try {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:$packageName")))
+                } catch (e: Exception) {
+                    toast("Open Settings → Battery → QuietOS → " +
+                        "Unrestricted.")
+                }
+            })
+        }
+        panel.addView(setupButton("CLOSE") { dialog.dismiss() })
+
+        root.addView(panel)
+        dialog.setContentView(root)
+        dialog.window?.setLayout(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.MATCH_PARENT)
+        dialog.window?.setBackgroundDrawable(
+            ColorDrawable(Color.rgb(0x0B, 0x1F, 0x3A)))
         dialog.show()
     }
 
@@ -2219,6 +2614,17 @@ class NetworkHubActivity : AppCompatActivity() {
 
         card.addView(netButton("Guardian Module") { showGuardian() })
 
+        card.addView(sectionLabel("Card Alerts"))
+        card.addView(netButton("Card alerts setup") { showCardSetup() })
+        card.addView(TextView(this).apply {
+            text = "Governor approvals and Sentinel holds arrive here " +
+                "as decision cards — in NOW, with a ding. One-time " +
+                "pairing: confirm this phone's key fingerprint once."
+            textSize = 12f
+            setTextColor(DIM)
+            setPadding(dp(4), 0, dp(4), dp(4))
+        })
+
         card.addView(sectionLabel("Log"))
         logText = TextView(this).apply {
             textSize = 12f
@@ -2629,6 +3035,12 @@ class NetworkHubActivity : AppCompatActivity() {
         stageLines?.startCurrent()
         refreshStatus()
         refreshAllStageBuckets()
+        // Card sweep on resume: a card that arrived while the hub was
+        // closed is pulled and badged before Jon has to wonder.
+        lifecycleScope.launch {
+            CardRelay.sweep(this@NetworkHubActivity)
+            updateCardBadge()
+        }
         refreshHandler.removeCallbacks(refreshRunnable)
         refreshHandler.postDelayed(refreshRunnable, 5000)
     }

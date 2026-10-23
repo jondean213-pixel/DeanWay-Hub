@@ -61,6 +61,8 @@ dependencies {
     // and the native library is 64-bit-only (breaks 32-bit installs).
     "motorolaImplementation"("com.google.ai.edge.litertlm:litertlm-android:0.17.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // App card route: WorkManager 15-minute backstop sweep (design §4).
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     // Firebase: cloud relay transport (Realtime Database) + push wake-up (FCM).
     // The relay envelopes are AES-256-GCM sealed before they touch Firebase —
     // Google only ever sees ciphertext.

@@ -90,6 +90,16 @@
             </intent-filter>
         </service>
 
+        <!-- App card route: notification Approve/Deny + Release/Kill
+             actions land here (signed decisions, CardRelay.decide). -->
+        <receiver
+            android:name=".network.cards.CardDecisionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.deanwaylabs.quietos.CARD_DECISION"/>
+            </intent-filter>
+        </receiver>
+
         <service
             android:name=".attention.QuietNotificationListenerService"
             android:label="QuietOS Attention Engine"

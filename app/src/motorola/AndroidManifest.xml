@@ -1,4 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Motorola flavor only: the card-route setup screen offers a
+         battery-exemption deep link (a governor card must be able to
+         ding even after Android puts the app to sleep — design §6.5).
+         The permission only unlocks the settings offer; nothing is
+         exempt until Jon taps Allow there. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+
     <!-- Motorola flavor only: Jon's chosen hub-orb launcher icon.
          The main manifest stays icon-free so the phoneB flavor keeps
          the default system icon. Manifest merger applies these
